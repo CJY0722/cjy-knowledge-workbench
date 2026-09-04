@@ -6,6 +6,7 @@ import {
 
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { WorkspaceDashboard } from './workspace-dashboard';
 
 const tools = [
   { icon: Search, name: '语义检索', detail: '从 3357 个向量片段中找回上下文' },
@@ -28,12 +29,13 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <aside className="sidebar">
-        <a className="brand" href="#overview" aria-label="回到概览">
+        <a className="brand" href="#dashboard" aria-label="回到主页操作台">
           <span className="brand-mark"><Sparkles size={18} /></span>
           <span><strong>生长台</strong><small>KNOWLEDGE OS</small></span>
         </a>
         <nav aria-label="页面导航">
-          <a className="nav-link active" href="#overview"><CircleDot />运行概览</a>
+          <a className="nav-link active" href="#dashboard"><CircleDot />主页操作台</a>
+          <a className="nav-link" href="#overview"><Sparkles />运行概览</a>
           <a className="nav-link" href="#architecture"><Network />系统链路</a>
           <a className="nav-link" href="#tools"><Braces />MCP 工具</a>
           <a className="nav-link" href="#privacy"><LockKeyhole />隐私边界</a>
@@ -49,6 +51,8 @@ export default function Home() {
           <div><p className="eyebrow">第二大脑 / 工作台</p><h1>自生长知识库</h1></div>
           <Badge variant="outline" className="status-badge"><Check /> MCP 已连接</Badge>
         </header>
+
+        <WorkspaceDashboard />
 
         <section id="overview" className="overview-grid">
           <div className="intro-panel">
