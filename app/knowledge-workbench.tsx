@@ -38,7 +38,18 @@ type Snapshot = {
 };
 type FeedItem = { title: string; url: string; source?: string; description?: string; stars?: number };
 type PulseData = { updatedAt: string; rss: FeedItem[]; github: FeedItem[] };
-type DialogMode = 'research' | 'search' | 'capture' | null;
+type DialogMode = 'research' | 'search' | 'capture' | 'connections' | 'brief' | null;
+type ConnectionsResult = {
+  note: string;
+  outgoing: string[];
+  backlinks: string[];
+  related: Array<{ path: string; score: number; reason: string }>;
+};
+type DailyBrief = {
+  summary: string;
+  priorities: Array<{ kind: string; text: string }>;
+  recentNotes: RecentNote[];
+};
 
 const BRIDGE = 'http://127.0.0.1:8765';
 const fallbackBase = Date.UTC(2026, 8, 4);
@@ -117,6 +128,7 @@ export function KnowledgeWorkbench() {
   const [query, setQuery] = useState('');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
+  const [notePath, setNotePath] = useState('');
   const [result, setResult] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
   const [done, setDone] = useState<number[]>([]);
@@ -197,7 +209,25 @@ export function KnowledgeWorkbench() {
   };
 
   const openDialog = (mode: DialogMode) => {
-    setDialog(mode); setQuery(''); setTitle(''); setContent(''); setResult('');
+    setDialog(mode); setQuery(''); setTitle(''); setContent(''); setNotePath(''); setResult('');
+  };
+
+  const runBrief = async () => {
+    openDialog('brief');
+    setActionBusy(true);
+    setResult('正在整理今日行动建议...');
+    try {
+      const brief = await bridgeAction({ action: 'brief' }) as DailyBrief;
+      const priorities = brief.priorities.map((item, index) => `${index + 1}. [${item.kind}] ${item.text}`).join('\n');
+      const recent = brief.recentNotes.map((item) => `- ${item.name}（${item.path}）`).join('\n');
+      setResult(`${brief.summary}\n\n${priorities}\n\n最近修改\n${recent || '暂无最近修改'}`);
+      setBridgeOnline(true);
+    } catch (error) {
+      setBridgeOnline(false);
+      setResult(`本地桥接调用失败：${error instanceof Error ? error.message : '未知错误'}\n\n请先运行 start-dashboard-bridge.ps1`);
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const submitDialog = async (event: { preventDefault(): void }) => {
@@ -213,7 +243,13 @@ export function KnowledgeWorkbench() {
         setResult((Array.isArray(matches) ? matches : matches.results || []).map((item) =>
           `${item.path || '未命名笔记'}${item.score ? `，相关度 ${Number(item.score).toFixed(3)}` : ''}\n${item.text || ''}`
         ).join('\n\n'));
-      } else {
+      } else if (dialog === 'connections') {
+        const connections = await bridgeAction({ action: 'connections', path: notePath, limit: 6 }) as ConnectionsResult;
+        const outgoing = connections.outgoing.map((item) => `- ${item}`).join('\n') || '- 无';
+        const backlinks = connections.backlinks.map((item) => `- ${item}`).join('\n') || '- 无';
+        const related = connections.related.map((item) => `- ${item.path}，相关度 ${item.score.toFixed(3)}`).join('\n') || '- 暂无建议';
+        setResult(`当前笔记\n${connections.note}\n\n出链\n${outgoing}\n\n反向链接\n${backlinks}\n\n建议连接\n${related}`);
+      } else if (dialog === 'capture') {
         const saved = await bridgeAction({ action: 'capture', title, content, tags: ['待整理', '工作台采集'] }) as { path?: string };
         setResult(`已保存到收件箱\n${saved.path || JSON.stringify(saved)}`);
         await refreshBridge();
@@ -265,6 +301,8 @@ export function KnowledgeWorkbench() {
         <div className="plain-tools" aria-label="常用操作">
           <Button onClick={() => openDialog('research')}><Sparkles />深度研究</Button>
           <Button variant="outline" onClick={() => openDialog('search')}><Search />搜索笔记</Button>
+          <Button variant="outline" onClick={() => openDialog('connections')} disabled={actionBusy}><Link2 />查看关联</Button>
+          <Button variant="outline" onClick={() => void runBrief()} disabled={actionBusy}><CalendarDays />今日简报</Button>
           <Button variant="outline" onClick={() => openDialog('capture')}><Inbox />存入收件箱</Button>
           <Button variant="outline" onClick={runIndex} disabled={actionBusy}><Database />更新索引</Button>
           <Button variant="outline" onClick={() => { changeTab('pulse'); void refreshPulse(); }} disabled={pulseLoading}><Rss />更新资讯</Button>
@@ -339,11 +377,11 @@ export function KnowledgeWorkbench() {
         <DialogContent className="plain-dialog">
           <form onSubmit={submitDialog}>
             <DialogHeader>
-              <DialogTitle>{dialog === 'research' ? '深度研究' : dialog === 'search' ? '搜索知识库' : '存入收件箱'}</DialogTitle>
-              <DialogDescription>{dialog === 'capture' ? '只会在 00-收件箱中新建一篇笔记。' : '通过本地桥接访问你的 Obsidian 知识库。'}</DialogDescription>
+              <DialogTitle>{dialog === 'research' ? '深度研究' : dialog === 'search' ? '搜索知识库' : dialog === 'connections' ? '查看笔记关联' : dialog === 'brief' ? '今日简报' : '存入收件箱'}</DialogTitle>
+              <DialogDescription>{dialog === 'capture' ? '只会在 00-收件箱中新建一篇笔记。' : dialog === 'connections' ? '只读分析出链、反向链接和未连接的相似笔记。' : dialog === 'brief' ? '根据当前知识库状态生成只读行动清单。' : '通过本地桥接访问你的 Obsidian 知识库。'}</DialogDescription>
             </DialogHeader>
-            <div className="plain-dialog-fields">{dialog === 'capture' ? <><label htmlFor="capture-title">标题</label><Input id="capture-title" value={title} onChange={(event) => setTitle(event.target.value)} required placeholder="输入资料标题" /><label htmlFor="capture-content">内容</label><Textarea id="capture-content" value={content} onChange={(event) => setContent(event.target.value)} required placeholder="粘贴需要长期保留的内容" rows={8} /></> : <><label htmlFor="agent-query">{dialog === 'research' ? '研究问题' : '关键词或问题'}</label><Textarea id="agent-query" value={query} onChange={(event) => setQuery(event.target.value)} required placeholder={dialog === 'research' ? '例如：总结知识库中关于智能体记忆的关键结论' : '输入要查找的主题'} rows={4} /></>}{result && <pre className="plain-result">{result}</pre>}</div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setDialog(null)}>取消</Button><Button type="submit" disabled={actionBusy}>{actionBusy ? <RefreshCw className="spin" /> : dialog === 'capture' ? <Inbox /> : <Bot />}{dialog === 'capture' ? '保存' : '开始'}</Button></DialogFooter>
+            <div className="plain-dialog-fields">{dialog === 'capture' ? <><label htmlFor="capture-title">标题</label><Input id="capture-title" value={title} onChange={(event) => setTitle(event.target.value)} required placeholder="输入资料标题" /><label htmlFor="capture-content">内容</label><Textarea id="capture-content" value={content} onChange={(event) => setContent(event.target.value)} required placeholder="粘贴需要长期保留的内容" rows={8} /></> : dialog === 'connections' ? <><label htmlFor="note-path">笔记路径</label><Input id="note-path" value={notePath} onChange={(event) => setNotePath(event.target.value)} required placeholder="例如：40-资源/知识库/概念/双向链接.md" /></> : dialog !== 'brief' ? <><label htmlFor="agent-query">{dialog === 'research' ? '研究问题' : '关键词或问题'}</label><Textarea id="agent-query" value={query} onChange={(event) => setQuery(event.target.value)} required placeholder={dialog === 'research' ? '例如：总结知识库中关于智能体记忆的关键结论' : '输入要查找的主题'} rows={4} /></> : null}{result && <pre className="plain-result">{result}</pre>}</div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setDialog(null)}>{dialog === 'brief' ? '关闭' : '取消'}</Button>{dialog !== 'brief' && <Button type="submit" disabled={actionBusy}>{actionBusy ? <RefreshCw className="spin" /> : dialog === 'capture' ? <Inbox /> : dialog === 'connections' ? <Link2 /> : <Bot />}{dialog === 'capture' ? '保存' : dialog === 'connections' ? '分析' : '开始'}</Button>}</DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

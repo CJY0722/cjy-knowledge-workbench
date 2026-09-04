@@ -127,7 +127,7 @@
 .plain-tools [data-slot="button"]:first-child:hover { color: #fff; background: #2d563f; }
 .plain-app [data-slot="button"] svg { width: 16px; }
 
-.plain-tools { min-height: 66px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--plain-line); }
+.plain-tools { min-height: 66px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--plain-line); }
 .plain-notice { min-height: 40px; display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 8px 12px; color: #3e5647; border: 1px solid #c8d5cb; border-radius: 7px; background: #e8f0ea; font-size: 13px; }
 .plain-notice span { flex: 1; }
 .plain-notice button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: #647169; border: 0; background: transparent; }
