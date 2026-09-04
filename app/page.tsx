@@ -1,5 +1,5 @@
-import { WorkspaceDashboard } from './workspace-dashboard';
+import { KnowledgeWorkbench } from './knowledge-workbench';
 
 export default function Home() {
-  return <WorkspaceDashboard />;
+  return <KnowledgeWorkbench />;
 }
