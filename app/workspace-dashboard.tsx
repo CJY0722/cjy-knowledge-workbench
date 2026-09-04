@@ -42,15 +42,15 @@ type PulseData = { updatedAt: string; rss: FeedItem[]; github: FeedItem[] };
 type DialogMode = 'research' | 'search' | 'capture' | null;
 
 const BRIDGE = 'http://127.0.0.1:8765';
-const today = new Date();
+const fallbackBase = Date.UTC(2026, 8, 4);
 
 const fallbackActivity = Array.from({ length: 84 }, (_, index) => ({
-  date: new Date(today.getTime() - (83 - index) * 86400000).toISOString().slice(0, 10),
+  date: new Date(fallbackBase - (83 - index) * 86400000).toISOString().slice(0, 10),
   count: [0, 0, 1, 0, 2, 0, 0, 3, 1, 0, 4, 0][index % 12],
 }));
 
 const fallbackSnapshot: Snapshot = {
-  generatedAt: new Date().toISOString(), notes: 163, chunks: 3359,
+  generatedAt: '2026-09-04T00:00:00+08:00', notes: 163, chunks: 3359,
   healthScore: 92, linkIntegrity: 99, metadataCoverage: 79,
   inboxCount: 2, taskFlow: 0,
   tasks: [
@@ -59,10 +59,10 @@ const fallbackSnapshot: Snapshot = {
     { title: '回流项目经验与方法', path: '40-资源', done: false },
   ],
   recentNotes: [
-    { name: '知识库运行日志', path: '40-资源/知识库运行日志.md', updated: new Date().toISOString() },
-    { name: '知识库智能体操作中心', path: '30-领域/知识库智能体操作中心.md', updated: new Date().toISOString() },
-    { name: '知识库索引', path: '40-资源/知识库索引.md', updated: new Date().toISOString() },
-    { name: 'Obsidian主页升级视频', path: '40-资源/知识库/来源', updated: new Date().toISOString() },
+    { name: '知识库运行日志', path: '40-资源/知识库运行日志.md', updated: '2026-09-04T00:00:00+08:00' },
+    { name: '知识库智能体操作中心', path: '30-领域/知识库智能体操作中心.md', updated: '2026-09-04T00:00:00+08:00' },
+    { name: '知识库索引', path: '40-资源/知识库索引.md', updated: '2026-09-04T00:00:00+08:00' },
+    { name: 'Obsidian主页升级视频', path: '40-资源/知识库/来源', updated: '2026-09-04T00:00:00+08:00' },
   ],
   activity: fallbackActivity,
   issues: { brokenLinks: [], orphans: [], stale: [] },
@@ -80,7 +80,7 @@ const tokenWindows = [
 ];
 
 const fallbackPulse: PulseData = {
-  updatedAt: new Date().toISOString(),
+  updatedAt: '2026-09-04T00:00:00+08:00',
   rss: [
     { title: 'Agent workflow patterns worth testing this week', url: '#', source: 'Hacker News' },
     { title: 'Local-first knowledge systems and durable memory', url: '#', source: 'GitHub Blog' },
@@ -94,7 +94,7 @@ const fallbackPulse: PulseData = {
 function shortTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
 function activityLevel(count: number) {
@@ -130,21 +130,15 @@ export function WorkspaceDashboard() {
   const [bridgeOnline, setBridgeOnline] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [pulseLoading, setPulseLoading] = useState(false);
-  const [tab, setTab] = useState(() => {
-    if (typeof window === 'undefined') return 'overview';
-    const hash = window.location.hash.replace('#', '');
-    return ['overview', 'today', 'vault', 'pulse'].includes(hash) ? hash : 'overview';
-  });
+  const [tab, setTab] = useState('overview');
   const [dialog, setDialog] = useState<DialogMode>(null);
   const [query, setQuery] = useState('');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [result, setResult] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
-  const [done, setDone] = useState<number[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try { return JSON.parse(localStorage.getItem('workbench-task-state') || '[]'); } catch { return []; }
-  });
+  const [done, setDone] = useState<number[]>([]);
+  const [now, setNow] = useState(() => new Date(0));
   const [notice, setNotice] = useState('');
 
   const refreshBridge = async () => {
@@ -176,6 +170,10 @@ export function WorkspaceDashboard() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      const hash = window.location.hash.replace('#', '');
+      if (['overview', 'today', 'vault', 'pulse'].includes(hash)) setTab(hash);
+      try { setDone(JSON.parse(localStorage.getItem('workbench-task-state') || '[]')); } catch { setDone([]); }
+      setNow(new Date());
       void refreshBridge();
       void refreshPulse();
     }, 0);
@@ -321,7 +319,7 @@ export function WorkspaceDashboard() {
 
             <TabsContent value="today" className="tab-panel">
               <section className="today-layout">
-                <article className="panel day-clock"><p>LOCAL TIME</p><strong>{new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(today)}</strong><span>{new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }).format(today)}</span><div className="clock-orbit"><i /><Bot /></div></article>
+                <article className="panel day-clock"><p>LOCAL TIME</p><strong>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(now)}</strong><span>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }).format(now)}</span><div className="clock-orbit"><i /><Bot /></div></article>
                 <article className="panel today-focus"><div className="panel-title"><div><span className="section-index">01</span><h2>TODAY FOCUS</h2></div><Badge>{completed}/{visibleTasks.length}</Badge></div><div className="task-stack">{visibleTasks.map((task, index) => <button key={`${task.title}-${index}`} onClick={() => toggleTask(index)} className={done.includes(index) ? 'done' : ''}>{done.includes(index) ? <CheckCircle2 /> : <Circle />}<span><strong>{task.title}</strong><small>{task.path}</small></span><ChevronRight /></button>)}</div></article>
               </section>
               <section className="today-bottom"><article className="panel timeline"><div className="panel-title"><div><span className="section-index">02</span><h2>AGENT TIMELINE</h2></div><Activity /></div>{['Refresh knowledge index', 'Review inbox material', 'Link reusable methods', 'Write operations log'].map((name, index) => <div className="timeline-row" key={name}><time>{String(9 + index * 2).padStart(2, '0')}:00</time><i /><span><strong>{name}</strong><small>{index === 0 ? 'Ready via local bridge' : 'Scheduled workflow'}</small></span></div>)}</article><article className="panel bridge-panel"><ShieldCheck /><h2>LOCAL BRIDGE</h2><strong>{bridgeOnline ? 'CONNECTED' : 'OFFLINE'}</strong><p>只允许读取统计、检索、Agent 问答、增量索引，以及向 00-收件箱新增笔记。</p><Button variant="outline" onClick={refreshBridge}><RefreshCw />CHECK CONNECTION</Button></article></section>
