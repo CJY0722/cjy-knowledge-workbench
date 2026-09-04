@@ -73,8 +73,8 @@ export default function Home() {
             </CardHeader>
             <CardContent>
               <div className="metric-grid">
-                <div><strong>162</strong><span>已索引笔记</span></div>
-                <div><strong>3,357</strong><span>向量片段</span></div>
+                <div><strong>163</strong><span>已索引笔记</span></div>
+                <div><strong>3,359</strong><span>向量片段</span></div>
                 <div><strong>6</strong><span>MCP 工具</span></div>
                 <div><strong>3/3</strong><span>测试通过</span></div>
               </div>
