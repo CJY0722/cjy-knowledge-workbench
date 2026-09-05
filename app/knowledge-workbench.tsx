@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react';
 import {
   Activity, BookOpen, Bot, CalendarDays, Check, CheckCircle2, Circle,
-  Database, FileText, GitBranch, Inbox, Link2, ListTodo, RefreshCw,
-  Rss, Search, Settings, ShieldCheck, Sparkles, TriangleAlert, X,
+  Database, ExternalLink, FileText, GitBranch, Inbox, Library, Link2, ListTodo,
+  Network, RefreshCw, Rss, Search, Settings, ShieldCheck, Sparkles,
+  TriangleAlert, X,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -50,6 +51,11 @@ type DailyBrief = {
   priorities: Array<{ kind: string; text: string }>;
   recentNotes: RecentNote[];
 };
+type ClippingItem = { path: string; title: string; section: string; updated: string; preview: string; links: number };
+type ClippingsData = { generatedAt: string; total: number; items: ClippingItem[] };
+type GraphNode = { id: string; label: string; group: string; degree: number };
+type GraphEdge = { source: string; target: string };
+type GraphData = { generatedAt: string; scope: string; nodes: GraphNode[]; edges: GraphEdge[]; totalNodes: number; orphanCount: number };
 
 const BRIDGE = 'http://127.0.0.1:8765';
 const fallbackBase = Date.UTC(2026, 8, 4);
@@ -117,6 +123,50 @@ function Score({ label, value, note }: { label: string; value: number; note: str
   return <div className="plain-score"><strong>{value}</strong><div><span>{label}</span><small>{note}</small></div></div>;
 }
 
+function obsidianUrl(path: string) {
+  return `obsidian://open?vault=${encodeURIComponent('自生长知识库')}&file=${encodeURIComponent(path)}`;
+}
+
+function RelationGraph({ data, selected, onSelect }: { data: GraphData; selected: string; onSelect(path: string): void }) {
+  const positions = new Map<string, { x: number; y: number }>();
+  data.nodes.forEach((node, index) => {
+    if (index === 0) {
+      positions.set(node.id, { x: 450, y: 300 });
+      return;
+    }
+    const ring = index <= 12 ? { start: 1, count: 12, radius: 105 } : index <= 40 ? { start: 13, count: 28, radius: 195 } : { start: 41, count: Math.max(1, data.nodes.length - 41), radius: 280 };
+    const angle = ((index - ring.start) / ring.count) * Math.PI * 2 - Math.PI / 2;
+    positions.set(node.id, { x: 450 + Math.cos(angle) * ring.radius, y: 300 + Math.sin(angle) * ring.radius });
+  });
+  const selectedNode = data.nodes.find((node) => node.id === selected) || data.nodes[0];
+
+  return <div className="plain-graph-layout">
+    <div className="plain-graph-canvas">
+      {data.nodes.length ? <svg viewBox="0 0 900 600" role="img" aria-label={`Clippings 关系图谱，共 ${data.nodes.length} 个节点`}>
+        <g className="plain-graph-edges">{data.edges.map((edge) => {
+          const source = positions.get(edge.source); const target = positions.get(edge.target);
+          return source && target ? <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} /> : null;
+        })}</g>
+        <g>{data.nodes.map((node, index) => {
+          const point = positions.get(node.id); if (!point) return null;
+          const active = node.id === selectedNode?.id;
+          return <g key={node.id} className={`plain-graph-node ${node.group === 'raw' ? 'raw' : 'wiki'} ${active ? 'active' : ''}`} role="button" tabIndex={0} aria-label={`${node.label}，${node.degree} 条关系`} onClick={() => onSelect(node.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelect(node.id); }}>
+            <circle cx={point.x} cy={point.y} r={active ? 9 : Math.min(8, 4 + node.degree * 0.45)} />
+            {(index < 10 || active) && <text x={point.x + 10} y={point.y - 8}>{node.label.slice(0, 18)}</text>}
+          </g>;
+        })}</g>
+      </svg> : <div className="plain-empty"><Network />连接本地桥接后显示关系图谱</div>}
+    </div>
+    <aside className="plain-graph-detail">
+      <span>当前节点</span>
+      <strong>{selectedNode?.label || '尚未选择'}</strong>
+      <small>{selectedNode?.id || '点击图中的节点查看信息'}</small>
+      {selectedNode && <><p>{selectedNode.degree} 条显式 Wiki 链接关系</p><a href={obsidianUrl(selectedNode.id)}>在 Obsidian 打开<ExternalLink /></a></>}
+      <div className="plain-graph-legend"><i className="wiki" />结构化知识<i className="raw" />原始剪藏</div>
+    </aside>
+  </div>;
+}
+
 export function KnowledgeWorkbench() {
   const [snapshot, setSnapshot] = useState(fallbackSnapshot);
   const [pulse, setPulse] = useState(fallbackPulse);
@@ -134,6 +184,11 @@ export function KnowledgeWorkbench() {
   const [done, setDone] = useState<number[]>([]);
   const [now, setNow] = useState<Date | null>(null);
   const [notice, setNotice] = useState('');
+  const [clippings, setClippings] = useState<ClippingsData>({ generatedAt: '', total: 0, items: [] });
+  const [graph, setGraph] = useState<GraphData>({ generatedAt: '', scope: 'Clippings', nodes: [], edges: [], totalNodes: 0, orphanCount: 0 });
+  const [clipQuery, setClipQuery] = useState('');
+  const [selectedNode, setSelectedNode] = useState('');
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
 
   const refreshBridge = async () => {
     setSyncing(true);
@@ -162,14 +217,38 @@ export function KnowledgeWorkbench() {
     }
   };
 
+  const refreshKnowledgeViews = async (query = clipQuery) => {
+    setKnowledgeLoading(true);
+    try {
+      const [libraryResponse, graphResponse] = await Promise.all([
+        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'clippings', query, limit: 100 }) }),
+        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'graph', prefix: 'Clippings', limit: 120 }) }),
+      ]);
+      if (!libraryResponse.ok || !graphResponse.ok) throw new Error('读取失败');
+      const libraryBody = await libraryResponse.json() as { result?: ClippingsData };
+      const graphBody = await graphResponse.json() as { result?: GraphData };
+      if (libraryBody.result) setClippings(libraryBody.result);
+      if (graphBody.result) {
+        setGraph(graphBody.result);
+        setSelectedNode((current) => current || graphBody.result?.nodes[0]?.id || '');
+      }
+      setBridgeOnline(true);
+    } catch {
+      setNotice('无法读取 Clippings 与关系图谱，请先启动本地桥接。');
+    } finally {
+      setKnowledgeLoading(false);
+    }
+  };
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const hash = window.location.hash.replace('#', '');
-      if (['overview', 'today', 'vault', 'pulse'].includes(hash)) setTab(hash);
+      if (['overview', 'today', 'vault', 'clippings', 'graph', 'pulse'].includes(hash)) setTab(hash);
       try { setDone(JSON.parse(localStorage.getItem('workbench-task-state') || '[]')); } catch { setDone([]); }
       setNow(new Date());
       void refreshBridge();
       void refreshPulse();
+      void refreshKnowledgeViews('');
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -279,6 +358,8 @@ export function KnowledgeWorkbench() {
             <TabsTrigger value="overview"><Activity />概览</TabsTrigger>
             <TabsTrigger value="today"><ListTodo />今日</TabsTrigger>
             <TabsTrigger value="vault"><Database />知识库</TabsTrigger>
+            <TabsTrigger value="clippings"><Library />剪藏</TabsTrigger>
+            <TabsTrigger value="graph"><Network />图谱</TabsTrigger>
             <TabsTrigger value="pulse"><Rss />资讯</TabsTrigger>
           </TabsList>
         </Tabs>
@@ -294,7 +375,7 @@ export function KnowledgeWorkbench() {
           <div className="plain-header-actions">
             <Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '实时数据' : '本地快照'}</Badge>
             <span>更新于 {shortTime(snapshot.generatedAt)}</span>
-            <Button variant="outline" onClick={refreshBridge} disabled={syncing}><RefreshCw className={syncing ? 'spin' : ''} />刷新</Button>
+            <Button variant="outline" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />刷新</Button>
           </div>
         </header>
 
@@ -361,6 +442,19 @@ export function KnowledgeWorkbench() {
               <section className="plain-block"><SectionTitle title="长期未更新" note={`${snapshot.issues.stale.length} 项`} /><div className="plain-issue-list">{snapshot.issues.stale.length ? snapshot.issues.stale.map((item) => <p key={item}><CalendarDays /><span><strong>{item}</strong><small>超过 180 天未修改</small></span></p>) : <div className="plain-empty"><Check />暂无长期未更新笔记</div>}</div></section>
               <section className="plain-block"><SectionTitle title="元数据检查" /><div className="plain-empty warning"><TriangleAlert />仍有 {100 - snapshot.metadataCoverage}% 的笔记需要补充元数据</div></section>
             </div>
+          </TabsContent>
+
+          <TabsContent value="clippings">
+            <div className="plain-library-head">
+              <div><strong>{clippings.generatedAt ? clippings.total : 90}</strong><span>篇 Clippings 内容</span><small>原文件保持在原目录，工作台只读展示</small></div>
+              <form onSubmit={(event) => { event.preventDefault(); void refreshKnowledgeViews(clipQuery); }}><Input value={clipQuery} onChange={(event) => setClipQuery(event.target.value)} aria-label="检索 Clippings" placeholder="检索标题、正文或路径" /><Button type="submit" variant="outline" disabled={knowledgeLoading}><Search />检索</Button></form>
+            </div>
+            <div className="plain-clippings-list">{clippings.items.length ? clippings.items.map((item) => <article key={item.path}><div><Badge variant="outline">{item.section === 'raw' ? '原始资料' : '结构化知识'}</Badge><span>{item.links} 条链接</span><time>{shortTime(item.updated)}</time></div><h2>{item.title}</h2><p>{item.preview || '暂无可显示的摘要'}</p><footer><small>{item.path}</small><a href={obsidianUrl(item.path)}>在 Obsidian 打开<ExternalLink /></a></footer></article>) : <div className="plain-empty"><Library />连接本地桥接后显示 Clippings 内容</div>}</div>
+          </TabsContent>
+
+          <TabsContent value="graph">
+            <div className="plain-graph-summary"><div><strong>{graph.generatedAt ? graph.totalNodes : 90}</strong><span>图谱节点</span></div><div><strong>{graph.edges.length}</strong><span>显式关系</span></div><div><strong>{graph.orphanCount}</strong><span>孤立节点</span></div><Button variant="outline" onClick={() => void refreshKnowledgeViews()} disabled={knowledgeLoading}><RefreshCw className={knowledgeLoading ? 'spin' : ''} />刷新图谱</Button></div>
+            <RelationGraph data={graph} selected={selectedNode} onSelect={setSelectedNode} />
           </TabsContent>
 
           <TabsContent value="pulse">
