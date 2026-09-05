@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react';
 import {
   Activity, BookOpen, Bot, CalendarDays, Check, CheckCircle2, Circle,
-  Database, ExternalLink, FileText, GitBranch, Inbox, Library, Link2, ListTodo,
-  Network, RefreshCw, Rss, Search, Settings, ShieldCheck, Sparkles,
+  Command, Database, ExternalLink, FileText, GitBranch, History, Inbox, Library, Link2, ListTodo,
+  Network, Pin, PinOff, RefreshCw, Rss, Search, Settings, ShieldCheck, Sparkles,
   TriangleAlert, X,
 } from 'lucide-react';
 
@@ -19,7 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import './simple-workbench.css';
 
-type Task = { title: string; path: string; done: boolean };
+type Task = { title: string; path: string; done: boolean; dueDate?: string | null; priority?: string };
 type RecentNote = { name: string; path: string; updated: string };
 type ActivityDay = { date: string; count: number };
 type Issue = { source: string; target: string };
@@ -68,8 +68,8 @@ const fallbackSnapshot: Snapshot = {
   generatedAt: '2026-09-04T00:00:00+08:00', notes: 164, chunks: 3360,
   healthScore: 92, linkIntegrity: 99, metadataCoverage: 79, inboxCount: 2, taskFlow: 0,
   tasks: [
-    { title: '整理新增收件箱', path: '00-收件箱', done: false },
-    { title: '更新向量索引', path: '20-项目/智能体工作台', done: false },
+    { title: '整理新增收件箱', path: '00-收件箱', done: false, dueDate: '2026-09-05', priority: '高' },
+    { title: '更新向量索引', path: '20-项目/智能体工作台', done: false, dueDate: '2026-09-06', priority: '普通' },
     { title: '回流项目经验与方法', path: '40-资源', done: false },
   ],
   recentNotes: [
@@ -121,6 +121,17 @@ function SectionTitle({ title, note }: { title: string; note?: string }) {
 
 function Score({ label, value, note }: { label: string; value: number; note: string }) {
   return <div className="plain-score"><strong>{value}</strong><div><span>{label}</span><small>{note}</small></div></div>;
+}
+
+function TaskRows({ tasks, isDone, onToggle, empty = '暂无任务' }: { tasks: Task[]; isDone(task: Task): boolean; onToggle(task: Task): void; empty?: string }) {
+  if (!tasks.length) return <div className="plain-empty compact"><Check />{empty}</div>;
+  return <div className="plain-task-list large">{tasks.map((task) => {
+    const complete = isDone(task);
+    return <button key={`${task.path}-${task.title}`} className={complete ? 'done' : ''} onClick={() => onToggle(task)} disabled={task.done}>
+      {complete ? <CheckCircle2 /> : <Circle />}
+      <span><strong>{task.title}</strong><small>{task.dueDate ? `${task.dueDate} · ${task.priority || '普通'}优先级 · ` : ''}{task.path}</small></span>
+    </button>;
+  })}</div>;
 }
 
 function obsidianUrl(path: string) {
@@ -181,7 +192,7 @@ export function KnowledgeWorkbench() {
   const [notePath, setNotePath] = useState('');
   const [result, setResult] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
-  const [done, setDone] = useState<number[]>([]);
+  const [done, setDone] = useState<string[]>([]);
   const [now, setNow] = useState<Date | null>(null);
   const [notice, setNotice] = useState('');
   const [clippings, setClippings] = useState<ClippingsData>({ generatedAt: '', total: 0, items: [] });
@@ -189,6 +200,10 @@ export function KnowledgeWorkbench() {
   const [clipQuery, setClipQuery] = useState('');
   const [selectedNode, setSelectedNode] = useState('');
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [pinnedNotes, setPinnedNotes] = useState<RecentNote[]>([]);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
 
   const refreshBridge = async () => {
     setSyncing(true);
@@ -241,16 +256,33 @@ export function KnowledgeWorkbench() {
   };
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
     const timer = window.setTimeout(() => {
       const hash = window.location.hash.replace('#', '');
-      if (['overview', 'today', 'vault', 'clippings', 'graph', 'pulse'].includes(hash)) setTab(hash);
-      try { setDone(JSON.parse(localStorage.getItem('workbench-task-state') || '[]')); } catch { setDone([]); }
+      if (['overview', 'today', 'vault', 'clippings', 'graph', 'review', 'pulse'].includes(hash)) setTab(hash);
+      try {
+        const saved = JSON.parse(localStorage.getItem('workbench-task-state-v2') || '[]');
+        setDone(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === 'string') : []);
+      } catch { setDone([]); }
+      try {
+        const saved = JSON.parse(localStorage.getItem('workbench-pinned-notes') || '[]');
+        setPinnedNotes(Array.isArray(saved) ? saved : []);
+      } catch { setPinnedNotes([]); }
       setNow(new Date());
       void refreshBridge();
       void refreshPulse();
       void refreshKnowledgeViews('');
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
 
   const changeTab = (value: string) => {
@@ -258,10 +290,24 @@ export function KnowledgeWorkbench() {
     window.history.replaceState(null, '', `#${value}`);
   };
 
-  const toggleTask = (index: number) => {
-    const next = done.includes(index) ? done.filter((item) => item !== index) : [...done, index];
+  const taskKey = (task: Task) => `${task.path}\n${task.title}`;
+
+  const isTaskDone = (task: Task) => task.done || done.includes(taskKey(task));
+
+  const toggleTask = (task: Task) => {
+    const key = taskKey(task);
+    if (task.done) return;
+    const next = done.includes(key) ? done.filter((item) => item !== key) : [...done, key];
     setDone(next);
-    localStorage.setItem('workbench-task-state', JSON.stringify(next));
+    localStorage.setItem('workbench-task-state-v2', JSON.stringify(next));
+  };
+
+  const togglePinnedNote = (note: RecentNote) => {
+    const next = pinnedNotes.some((item) => item.path === note.path)
+      ? pinnedNotes.filter((item) => item.path !== note.path)
+      : [...pinnedNotes, note].slice(-8);
+    setPinnedNotes(next);
+    localStorage.setItem('workbench-pinned-notes', JSON.stringify(next));
   };
 
   const bridgeAction = async (payload: Record<string, unknown>) => {
@@ -342,12 +388,29 @@ export function KnowledgeWorkbench() {
     }
   };
 
-  const tasks = snapshot.tasks.slice(0, 6);
-  const completed = Math.min(tasks.length, done.length);
+  const tasks = snapshot.tasks.slice(0, 12);
+  const completed = tasks.filter(isTaskDone).length;
   const taskPercent = tasks.length ? Math.round(completed / tasks.length * 100) : snapshot.taskFlow;
   const updateCount = snapshot.activity.reduce((sum, day) => sum + day.count, 0);
   const clock = now ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(now) : '--:--';
   const date = now ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', weekday: 'long' }).format(now) : '正在读取日期';
+  const todayIso = now ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(now) : '';
+  const datedTasks = tasks.filter((task) => task.dueDate).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+  const overdueTasks = datedTasks.filter((task) => !isTaskDone(task) && String(task.dueDate) < todayIso);
+  const todayTasks = datedTasks.filter((task) => !isTaskDone(task) && task.dueDate === todayIso);
+  const upcomingTasks = datedTasks.filter((task) => !isTaskDone(task) && String(task.dueDate) > todayIso).slice(0, 6);
+  const reviewCandidates = [...new Set([...snapshot.issues.stale, ...snapshot.issues.orphans])];
+  const reviewPath = reviewCandidates.length ? reviewCandidates[reviewIndex % reviewCandidates.length] : '';
+  const commandItems = [
+    { label: '打开概览', detail: '回到知识库总览', run: () => changeTab('overview') },
+    { label: '查看任务日程', detail: '查看今天、逾期和近期任务', run: () => changeTab('today') },
+    { label: '查看固定笔记', detail: '回到概览中的固定笔记', run: () => changeTab('overview') },
+    { label: '知识回顾', detail: '重新发现长期未更新或孤立笔记', run: () => changeTab('review') },
+    { label: '搜索笔记', detail: '通过本地桥接检索知识库', run: () => openDialog('search') },
+    { label: '存入收件箱', detail: '快速保存一条资料', run: () => openDialog('capture') },
+    { label: '今日简报', detail: '生成当前行动建议', run: () => void runBrief() },
+    { label: '更新索引', detail: '索引新增和变化的笔记', run: () => void runIndex() },
+  ].filter((item) => `${item.label} ${item.detail}`.toLocaleLowerCase('zh-CN').includes(commandQuery.trim().toLocaleLowerCase('zh-CN')));
 
   return (
     <main className="plain-app">
@@ -360,6 +423,7 @@ export function KnowledgeWorkbench() {
             <TabsTrigger value="vault"><Database />知识库</TabsTrigger>
             <TabsTrigger value="clippings"><Library />剪藏</TabsTrigger>
             <TabsTrigger value="graph"><Network />图谱</TabsTrigger>
+            <TabsTrigger value="review"><History />回顾</TabsTrigger>
             <TabsTrigger value="pulse"><Rss />资讯</TabsTrigger>
           </TabsList>
         </Tabs>
@@ -387,6 +451,7 @@ export function KnowledgeWorkbench() {
           <Button variant="outline" onClick={() => openDialog('capture')}><Inbox />存入收件箱</Button>
           <Button variant="outline" onClick={runIndex} disabled={actionBusy}><Database />更新索引</Button>
           <Button variant="outline" onClick={() => { changeTab('pulse'); void refreshPulse(); }} disabled={pulseLoading}><Rss />更新资讯</Button>
+          <Button variant="outline" onClick={() => setCommandOpen(true)}><Command />命令面板 <kbd>Ctrl K</kbd></Button>
         </div>
 
         {notice && <div className="plain-notice"><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice('')}><X /></button></div>}
@@ -416,20 +481,29 @@ export function KnowledgeWorkbench() {
             <div className="plain-two-columns">
               <section className="plain-block">
                 <SectionTitle title="最近修改" />
-                <div className="plain-list">{snapshot.recentNotes.slice(0, 6).map((note) => <div key={note.path}><FileText /><span><strong>{note.name}</strong><small>{note.path}</small></span><time>{shortTime(note.updated)}</time></div>)}</div>
+                <div className="plain-list">{snapshot.recentNotes.slice(0, 6).map((note) => {
+                  const pinned = pinnedNotes.some((item) => item.path === note.path);
+                  return <div key={note.path}><FileText /><a href={obsidianUrl(note.path)}><strong>{note.name}</strong><small>{note.path}</small></a><time>{shortTime(note.updated)}</time><button aria-label={pinned ? `取消固定 ${note.name}` : `固定 ${note.name}`} onClick={() => togglePinnedNote(note)}>{pinned ? <PinOff /> : <Pin />}</button></div>;
+                })}</div>
               </section>
               <section className="plain-block">
                 <SectionTitle title="待办事项" note={`完成 ${taskPercent}%`} />
-                <div className="plain-task-list">{tasks.map((task, index) => <button key={`${task.path}-${index}`} className={done.includes(index) ? 'done' : ''} onClick={() => toggleTask(index)}>{done.includes(index) ? <CheckCircle2 /> : <Circle />}<span><strong>{task.title}</strong><small>{task.path}</small></span></button>)}</div>
+                <TaskRows tasks={tasks.slice(0, 6)} isDone={isTaskDone} onToggle={toggleTask} />
               </section>
             </div>
+
+            <section className="plain-block plain-pinned">
+              <SectionTitle title="固定笔记" note={`${pinnedNotes.length}/8`} />
+              {pinnedNotes.length ? <div className="plain-pinned-grid">{pinnedNotes.map((note) => <article key={note.path}><Pin /><a href={obsidianUrl(note.path)}><strong>{note.name}</strong><small>{note.path}</small></a><button aria-label={`取消固定 ${note.name}`} onClick={() => togglePinnedNote(note)}><X /></button></article>)}</div> : <div className="plain-empty compact"><Pin />在“最近修改”中固定常用笔记</div>}
+            </section>
           </TabsContent>
 
           <TabsContent value="today">
             <div className="plain-today-head"><div><span>{date}</span><strong>{clock}</strong></div><div><span>今日进度</span><strong>{completed}/{tasks.length}</strong><small>完成后会保存在当前浏览器</small></div></div>
-            <div className="plain-two-columns">
-              <section className="plain-block"><SectionTitle title="今天要做" /><div className="plain-task-list large">{tasks.map((task, index) => <button key={`${task.title}-${index}`} className={done.includes(index) ? 'done' : ''} onClick={() => toggleTask(index)}>{done.includes(index) ? <CheckCircle2 /> : <Circle />}<span><strong>{task.title}</strong><small>{task.path}</small></span></button>)}</div></section>
-              <section className="plain-block"><SectionTitle title="建议安排" /><div className="plain-schedule"><p><time>09:00</time><span><strong>更新知识索引</strong><small>扫描新增和变化的笔记</small></span></p><p><time>11:00</time><span><strong>整理收件箱</strong><small>保留原始资料，提炼可复用内容</small></span></p><p><time>15:00</time><span><strong>回流项目经验</strong><small>更新方法、模板和运行日志</small></span></p></div></section>
+            <div className="plain-agenda-grid">
+              <section className="plain-block"><SectionTitle title="今天到期" note={`${todayTasks.length} 项`} /><TaskRows tasks={todayTasks} isDone={isTaskDone} onToggle={toggleTask} empty="今天没有到期任务" /></section>
+              <section className="plain-block"><SectionTitle title="已逾期" note={`${overdueTasks.length} 项`} /><TaskRows tasks={overdueTasks} isDone={isTaskDone} onToggle={toggleTask} empty="没有逾期任务" /></section>
+              <section className="plain-block"><SectionTitle title="接下来" note="按截止日期排序" /><TaskRows tasks={upcomingTasks} isDone={isTaskDone} onToggle={toggleTask} empty="暂无近期任务" /></section>
             </div>
             <section className="plain-bridge-box"><ShieldCheck /><div><strong>{bridgeOnline ? '本地桥接运行正常' : '本地桥接尚未连接'}</strong><p>桥接只提供统计、索引、检索、问答和收件箱新增，不允许删除、移动或执行任意命令。</p></div><Button variant="outline" onClick={refreshBridge}>检查连接</Button></section>
           </TabsContent>
@@ -457,6 +531,17 @@ export function KnowledgeWorkbench() {
             <RelationGraph data={graph} selected={selectedNode} onSelect={setSelectedNode} />
           </TabsContent>
 
+          <TabsContent value="review">
+            <div className="plain-review-focus">
+              <div><span>本次回顾</span><strong>{reviewPath ? reviewPath.replace(/\.md$/, '').split('/').pop() : '暂无待回顾笔记'}</strong><small>{reviewPath || '当前没有长期未更新或孤立笔记'}</small></div>
+              <div>{reviewPath && <a href={obsidianUrl(reviewPath)}>在 Obsidian 打开<ExternalLink /></a>}<Button variant="outline" onClick={() => setReviewIndex((index) => reviewCandidates.length ? (index + 1) % reviewCandidates.length : 0)} disabled={!reviewCandidates.length}><RefreshCw />换一篇</Button></div>
+            </div>
+            <div className="plain-two-columns">
+              <section className="plain-block"><SectionTitle title="长期未更新" note={`${snapshot.issues.stale.length} 篇`} /><div className="plain-review-list">{snapshot.issues.stale.length ? snapshot.issues.stale.map((path) => <a href={obsidianUrl(path)} key={path}><History /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有长期未更新笔记</div>}</div></section>
+              <section className="plain-block"><SectionTitle title="孤立笔记" note={`${snapshot.issues.orphans.length} 篇`} /><div className="plain-review-list">{snapshot.issues.orphans.length ? snapshot.issues.orphans.map((path) => <a href={obsidianUrl(path)} key={path}><Network /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有孤立笔记</div>}</div></section>
+            </div>
+          </TabsContent>
+
           <TabsContent value="pulse">
             <div className="plain-pulse-summary"><div><strong>{pulse.rss.length}</strong><span>资讯条目</span></div><div><strong>{pulse.github.length}</strong><span>GitHub 项目</span></div><div><strong>{snapshot.inboxCount}</strong><span>待整理资料</span></div><Button variant="outline" onClick={refreshPulse} disabled={pulseLoading}><RefreshCw className={pulseLoading ? 'spin' : ''} />重新获取</Button></div>
             <div className="plain-two-columns">
@@ -466,6 +551,14 @@ export function KnowledgeWorkbench() {
           </TabsContent>
         </Tabs>
       </section>
+
+      <Dialog open={commandOpen} onOpenChange={setCommandOpen}>
+        <DialogContent className="plain-dialog plain-command-dialog">
+          <DialogHeader><DialogTitle>命令面板</DialogTitle><DialogDescription>搜索功能或直接跳转，快捷键 Ctrl K。</DialogDescription></DialogHeader>
+          <Input autoFocus value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} aria-label="搜索命令" placeholder="输入命令名称" />
+          <div className="plain-command-list">{commandItems.length ? commandItems.map((item) => <button key={item.label} onClick={() => { setCommandOpen(false); setCommandQuery(''); item.run(); }}><Command /><span><strong>{item.label}</strong><small>{item.detail}</small></span></button>) : <div className="plain-empty compact">没有匹配命令</div>}</div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}>
         <DialogContent className="plain-dialog">
