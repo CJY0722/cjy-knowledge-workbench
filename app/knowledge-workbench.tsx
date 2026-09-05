@@ -15,6 +15,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import './simple-workbench.css';
@@ -56,8 +58,20 @@ type ClippingsData = { generatedAt: string; total: number; items: ClippingItem[]
 type GraphNode = { id: string; label: string; group: string; degree: number };
 type GraphEdge = { source: string; target: string };
 type GraphData = { generatedAt: string; scope: string; nodes: GraphNode[]; edges: GraphEdge[]; totalNodes: number; orphanCount: number };
+type WorkbenchSettings = {
+  startTab: string;
+  theme: 'system' | 'light' | 'dark';
+  density: 'comfortable' | 'compact';
+  autoRefresh: boolean;
+};
 
 const BRIDGE = 'http://127.0.0.1:8765';
+const SETTINGS_KEY = 'workbench-settings';
+const DEFAULT_SETTINGS: WorkbenchSettings = { startTab: 'overview', theme: 'system', density: 'comfortable', autoRefresh: true };
+const TAB_OPTIONS = [
+  ['overview', '概览'], ['today', '今日'], ['vault', '知识库'], ['clippings', '剪藏'],
+  ['graph', '图谱'], ['review', '回顾'], ['pulse', '资讯'],
+];
 const fallbackBase = Date.UTC(2026, 8, 4);
 const fallbackActivity = Array.from({ length: 84 }, (_, index) => ({
   date: new Date(fallbackBase - (83 - index) * 86400000).toISOString().slice(0, 10),
@@ -204,6 +218,10 @@ export function KnowledgeWorkbench() {
   const [reviewIndex, setReviewIndex] = useState(0);
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<WorkbenchSettings>(DEFAULT_SETTINGS);
+  const [systemDark, setSystemDark] = useState(false);
+  const appliedTheme = settings.theme === 'system' ? (systemDark ? 'dark' : 'light') : settings.theme;
 
   const refreshBridge = async () => {
     setSyncing(true);
@@ -256,16 +274,31 @@ export function KnowledgeWorkbench() {
   };
 
   useEffect(() => {
+    const themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+    const onThemeChange = () => setSystemDark(themeMedia.matches);
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
     };
+    onThemeChange();
+    themeMedia.addEventListener('change', onThemeChange);
     window.addEventListener('keydown', onKeyDown);
     const timer = window.setTimeout(() => {
+      let savedSettings = DEFAULT_SETTINGS;
+      try {
+        const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') as Partial<WorkbenchSettings>;
+        savedSettings = { ...DEFAULT_SETTINGS, ...saved };
+        if (!TAB_OPTIONS.some(([value]) => value === savedSettings.startTab)) savedSettings.startTab = 'overview';
+        if (!['system', 'light', 'dark'].includes(savedSettings.theme)) savedSettings.theme = 'system';
+        if (!['comfortable', 'compact'].includes(savedSettings.density)) savedSettings.density = 'comfortable';
+        savedSettings.autoRefresh = savedSettings.autoRefresh !== false;
+        setSettings(savedSettings);
+      } catch { setSettings(DEFAULT_SETTINGS); }
       const hash = window.location.hash.replace('#', '');
-      if (['overview', 'today', 'vault', 'clippings', 'graph', 'review', 'pulse'].includes(hash)) setTab(hash);
+      if (TAB_OPTIONS.some(([value]) => value === hash)) setTab(hash);
+      else setTab(savedSettings.startTab);
       try {
         const saved = JSON.parse(localStorage.getItem('workbench-task-state-v2') || '[]');
         setDone(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === 'string') : []);
@@ -275,19 +308,48 @@ export function KnowledgeWorkbench() {
         setPinnedNotes(Array.isArray(saved) ? saved : []);
       } catch { setPinnedNotes([]); }
       setNow(new Date());
-      void refreshBridge();
-      void refreshPulse();
-      void refreshKnowledgeViews('');
+      if (savedSettings.autoRefresh) {
+        void refreshBridge();
+        void refreshPulse();
+        void refreshKnowledgeViews('');
+      }
     }, 0);
     return () => {
       window.clearTimeout(timer);
+      themeMedia.removeEventListener('change', onThemeChange);
       window.removeEventListener('keydown', onKeyDown);
     };
   }, []);
 
+  useEffect(() => {
+    document.documentElement.dataset.workbenchTheme = appliedTheme;
+    return () => { delete document.documentElement.dataset.workbenchTheme; };
+  }, [appliedTheme]);
+
   const changeTab = (value: string) => {
     setTab(value);
     window.history.replaceState(null, '', `#${value}`);
+  };
+
+  const updateSettings = (patch: Partial<WorkbenchSettings>) => {
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  };
+
+  const resetSettings = () => {
+    setSettings(DEFAULT_SETTINGS);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
+    setNotice('工作台设置已恢复默认。');
+  };
+
+  const clearLocalState = () => {
+    if (!window.confirm('清除当前浏览器中的任务勾选和固定笔记？此操作不会修改 Obsidian 笔记。')) return;
+    localStorage.removeItem('workbench-task-state-v2');
+    localStorage.removeItem('workbench-pinned-notes');
+    setDone([]);
+    setPinnedNotes([]);
+    setNotice('本地任务勾选和固定笔记已清除。');
   };
 
   const taskKey = (task: Task) => `${task.path}\n${task.title}`;
@@ -410,10 +472,11 @@ export function KnowledgeWorkbench() {
     { label: '存入收件箱', detail: '快速保存一条资料', run: () => openDialog('capture') },
     { label: '今日简报', detail: '生成当前行动建议', run: () => void runBrief() },
     { label: '更新索引', detail: '索引新增和变化的笔记', run: () => void runIndex() },
+    { label: '工作台设置', detail: '调整启动页、外观与刷新', run: () => setSettingsOpen(true) },
   ].filter((item) => `${item.label} ${item.detail}`.toLocaleLowerCase('zh-CN').includes(commandQuery.trim().toLocaleLowerCase('zh-CN')));
 
   return (
-    <main className="plain-app">
+    <main className="plain-app" data-theme={appliedTheme} data-density={settings.density}>
       <aside className="plain-sidebar">
         <div className="plain-brand"><BookOpen /><div><strong>自生长知识库</strong><span>个人知识工作台</span></div></div>
         <Tabs value={tab} onValueChange={changeTab} orientation="vertical" className="plain-nav-tabs">
@@ -429,7 +492,7 @@ export function KnowledgeWorkbench() {
         </Tabs>
         <div className="plain-sidebar-bottom">
           <div className="plain-connection"><span className={bridgeOnline ? 'connected' : ''} /><div><strong>{bridgeOnline ? '本地桥接已连接' : '当前使用快照'}</strong><small>{bridgeOnline ? '实时读取本机知识库' : '点击刷新尝试连接'}</small></div></div>
-          <button><Settings />设置</button>
+          <button onClick={() => setSettingsOpen(true)}><Settings />设置</button>
         </div>
       </aside>
 
@@ -451,6 +514,7 @@ export function KnowledgeWorkbench() {
           <Button variant="outline" onClick={() => openDialog('capture')}><Inbox />存入收件箱</Button>
           <Button variant="outline" onClick={runIndex} disabled={actionBusy}><Database />更新索引</Button>
           <Button variant="outline" onClick={() => { changeTab('pulse'); void refreshPulse(); }} disabled={pulseLoading}><Rss />更新资讯</Button>
+          <Button variant="outline" onClick={() => setSettingsOpen(true)}><Settings />设置</Button>
           <Button variant="outline" onClick={() => setCommandOpen(true)}><Command />命令面板 <kbd>Ctrl K</kbd></Button>
         </div>
 
@@ -551,6 +615,70 @@ export function KnowledgeWorkbench() {
           </TabsContent>
         </Tabs>
       </section>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="plain-dialog plain-settings-dialog">
+          <DialogHeader>
+            <DialogTitle>工作台设置</DialogTitle>
+            <DialogDescription>偏好保存在当前浏览器，不会写入或修改 Obsidian 笔记。</DialogDescription>
+          </DialogHeader>
+          <div className="plain-settings-sections">
+            <section>
+              <h3>工作方式</h3>
+              <div className="plain-setting-row">
+                <span><strong>启动页面</strong><small>没有指定链接页签时优先打开</small></span>
+                <Select value={settings.startTab} onValueChange={(value) => value && updateSettings({ startTab: value })}>
+                  <SelectTrigger aria-label="启动页面"><SelectValue /></SelectTrigger>
+                  <SelectContent className="plain-setting-select">{TAB_OPTIONS.map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <div className="plain-setting-row">
+                <span><strong>进入时自动刷新</strong><small>加载本地桥接、剪藏、图谱和资讯</small></span>
+                <Switch checked={settings.autoRefresh} onCheckedChange={(checked) => updateSettings({ autoRefresh: checked })} aria-label="进入时自动刷新" />
+              </div>
+            </section>
+
+            <section>
+              <h3>外观</h3>
+              <div className="plain-setting-row">
+                <span><strong>颜色模式</strong><small>可跟随电脑的明暗设置</small></span>
+                <Select value={settings.theme} onValueChange={(value) => value && updateSettings({ theme: value as WorkbenchSettings['theme'] })}>
+                  <SelectTrigger aria-label="颜色模式"><SelectValue /></SelectTrigger>
+                  <SelectContent className="plain-setting-select"><SelectItem value="system">跟随系统</SelectItem><SelectItem value="light">浅色</SelectItem><SelectItem value="dark">深色</SelectItem></SelectContent>
+                </Select>
+              </div>
+              <div className="plain-setting-row">
+                <span><strong>内容密度</strong><small>紧凑模式会缩小区块与列表间距</small></span>
+                <Select value={settings.density} onValueChange={(value) => value && updateSettings({ density: value as WorkbenchSettings['density'] })}>
+                  <SelectTrigger aria-label="内容密度"><SelectValue /></SelectTrigger>
+                  <SelectContent className="plain-setting-select"><SelectItem value="comfortable">舒适</SelectItem><SelectItem value="compact">紧凑</SelectItem></SelectContent>
+                </Select>
+              </div>
+            </section>
+
+            <section>
+              <h3>本地连接</h3>
+              <div className="plain-setting-row">
+                <span><strong>Obsidian 桥接</strong><small>{bridgeOnline ? '已连接，可读取实时知识库数据' : '未连接，工作台显示最近快照'}</small></span>
+                <div className="plain-setting-action"><Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '已连接' : '未连接'}</Badge><Button variant="outline" size="sm" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />重试</Button></div>
+              </div>
+            </section>
+
+            <section>
+              <h3>本地数据</h3>
+              <div className="plain-setting-row plain-setting-reset">
+                <span><strong>重置偏好</strong><small>恢复默认启动页、主题、密度与自动刷新</small></span>
+                <Button variant="outline" size="sm" onClick={resetSettings}>恢复默认</Button>
+              </div>
+              <div className="plain-setting-row plain-setting-reset">
+                <span><strong>清除交互记录</strong><small>只清除任务勾选与固定笔记，不影响原始笔记</small></span>
+                <Button variant="outline" size="sm" className="plain-danger-button" onClick={clearLocalState}>清除记录</Button>
+              </div>
+            </section>
+          </div>
+          <DialogFooter><Button onClick={() => setSettingsOpen(false)}>完成</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={commandOpen} onOpenChange={setCommandOpen}>
         <DialogContent className="plain-dialog plain-command-dialog">
