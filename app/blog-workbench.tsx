@@ -32,7 +32,6 @@ type HumanizerStatus = 'pending' | 'checked' | 'skipped';
 type MaterialKind = 'markdown' | 'visual';
 
 const SESSION_KEY = 'cjy-blog-session-v1';
-const EXPECTED_VAULT = 'E:\\ObsidianVault';
 
 async function copyText(value: string) {
   if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不支持安全剪贴板，请手动复制');
@@ -41,11 +40,13 @@ async function copyText(value: string) {
 
 export function BlogWorkbench({
   bridge,
+  bridgeToken,
   bridgeOnline,
   onBridgeState,
   onNotice,
 }: {
   bridge: string;
+  bridgeToken: string;
   bridgeOnline: boolean;
   onBridgeState: (online: boolean) => void;
   onNotice: (message: string) => void;
@@ -81,16 +82,17 @@ export function BlogWorkbench({
   const [closurePreview, setClosurePreview] = useState<ClosurePreview | null>(null);
 
   const request = async <T,>(action: string, payload: Record<string, unknown> = {}) => {
-    const healthResponse = await fetch(`${bridge}/health`, { cache: 'no-store' });
-    const health = healthResponse.ok ? await healthResponse.json() as { vault?: string; vault_exists?: boolean } : {};
-    const activeVault = String(health.vault || '').replace(/[\\/]+$/, '').toLowerCase();
-    if (!healthResponse.ok || !health.vault_exists || activeVault !== EXPECTED_VAULT.toLowerCase()) {
+    if (!bridgeToken) throw new Error('请先在设置中连接自己的 Obsidian');
+    const headers = { 'X-Workbench-Token': bridgeToken };
+    const healthResponse = await fetch(`${bridge}/health`, { cache: 'no-store', headers });
+    const health = await healthResponse.json() as { vault_exists?: boolean; obsidian_configured?: boolean; error?: string };
+    if (!healthResponse.ok || !health.vault_exists || !health.obsidian_configured) {
       onBridgeState(false);
-      throw new Error(`本地桥接必须连接 ${EXPECTED_VAULT}`);
+      throw new Error(health.error || '本地桥接没有连接到有效的 Obsidian Vault');
     }
     const response = await fetch(`${bridge}/action`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({ action, ...payload }),
     });
     const data = await response.json() as { error?: string; code?: string; result?: T };

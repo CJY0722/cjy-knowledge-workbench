@@ -65,9 +65,10 @@ type WorkbenchSettings = {
   density: 'comfortable' | 'compact';
   autoRefresh: boolean;
 };
+type BridgeHealth = { vault_name?: string; vault_exists?: boolean; obsidian_configured?: boolean; error?: string };
 
 const BRIDGE = 'http://127.0.0.1:8766';
-const EXPECTED_VAULT = 'E:\\ObsidianVault';
+const BRIDGE_TOKEN_KEY = 'workbench-bridge-token';
 const SETTINGS_KEY = 'workbench-settings';
 const DEFAULT_SETTINGS: WorkbenchSettings = { startTab: 'overview', theme: 'system', density: 'comfortable', autoRefresh: true };
 const TAB_OPTIONS = [
@@ -128,11 +129,16 @@ function TaskRows({ tasks, isDone, onToggle, empty = '暂无任务' }: { tasks: 
   })}</div>;
 }
 
-function obsidianUrl(path: string) {
-  return `obsidian://open?vault=${encodeURIComponent('ObsidianVault')}&file=${encodeURIComponent(path)}`;
+function bridgeHeaders(token: string): Record<string, string> {
+  return token ? { 'X-Workbench-Token': token } : {};
 }
 
-function RelationGraph({ data, selected, onSelect }: { data: GraphData; selected: string; onSelect(path: string): void }) {
+function obsidianUrl(path: string, vaultName: string) {
+  const vault = vaultName ? `vault=${encodeURIComponent(vaultName)}&` : '';
+  return `obsidian://open?${vault}file=${encodeURIComponent(path)}`;
+}
+
+function RelationGraph({ data, selected, onSelect, vaultName }: { data: GraphData; selected: string; onSelect(path: string): void; vaultName: string }) {
   const positions = new Map<string, { x: number; y: number }>();
   data.nodes.forEach((node, index) => {
     if (index === 0) {
@@ -166,7 +172,7 @@ function RelationGraph({ data, selected, onSelect }: { data: GraphData; selected
       <span>当前节点</span>
       <strong>{selectedNode?.label || '尚未选择'}</strong>
       <small>{selectedNode?.id || '点击图中的节点查看信息'}</small>
-      {selectedNode && <><p>{selectedNode.degree} 条显式 Wiki 链接关系</p><a href={obsidianUrl(selectedNode.id)}>在 Obsidian 打开<ExternalLink /></a></>}
+      {selectedNode && <><p>{selectedNode.degree} 条显式 Wiki 链接关系</p><a href={obsidianUrl(selectedNode.id, vaultName)}>在 Obsidian 打开<ExternalLink /></a></>}
       <div className="plain-graph-legend"><i className="wiki" />结构化知识<i className="raw" />原始剪藏</div>
     </aside>
   </div>;
@@ -176,6 +182,9 @@ export function KnowledgeWorkbench() {
   const [snapshot, setSnapshot] = useState(fallbackSnapshot);
   const [pulse, setPulse] = useState(fallbackPulse);
   const [bridgeOnline, setBridgeOnline] = useState(false);
+  const [bridgeToken, setBridgeToken] = useState('');
+  const [vaultName, setVaultName] = useState('');
+  const [connectionError, setConnectionError] = useState('尚未与本地桥接配对');
   const [syncing, setSyncing] = useState(false);
   const [pulseLoading, setPulseLoading] = useState(false);
   const [tab, setTab] = useState('overview');
@@ -203,20 +212,30 @@ export function KnowledgeWorkbench() {
   const [systemDark, setSystemDark] = useState(false);
   const appliedTheme = settings.theme === 'system' ? (systemDark ? 'dark' : 'light') : settings.theme;
 
-  const refreshBridge = async () => {
+  const refreshBridge = async (token = bridgeToken) => {
+    if (!token) {
+      setBridgeOnline(false);
+      setConnectionError('尚未与本地桥接配对');
+      return;
+    }
     setSyncing(true);
     try {
+      const headers = bridgeHeaders(token);
       const [response, healthResponse] = await Promise.all([
-        fetch(`${BRIDGE}/snapshot`, { cache: 'no-store' }),
-        fetch(`${BRIDGE}/health`, { cache: 'no-store' }),
+        fetch(`${BRIDGE}/snapshot`, { cache: 'no-store', headers }),
+        fetch(`${BRIDGE}/health`, { cache: 'no-store', headers }),
       ]);
-      if (!response.ok || !healthResponse.ok) throw new Error('连接失败');
-      const health = await healthResponse.json() as { vault?: string; vault_exists?: boolean };
-      if (!health.vault_exists || String(health.vault || '').replace(/\\+$/, '').toLowerCase() !== EXPECTED_VAULT.toLowerCase()) throw new Error(`桥接必须连接 ${EXPECTED_VAULT}`);
+      const health = await healthResponse.json() as BridgeHealth;
+      if (!healthResponse.ok) throw new Error(health.error || '连接失败');
+      if (!health.vault_exists || !health.obsidian_configured) throw new Error('桥接没有连接到有效的 Obsidian Vault');
+      if (!response.ok) throw new Error('无法读取知识库快照');
       setSnapshot(await response.json());
+      setVaultName(health.vault_name || 'Obsidian');
       setBridgeOnline(true);
-    } catch {
+      setConnectionError('');
+    } catch (error) {
       setBridgeOnline(false);
+      setConnectionError(error instanceof Error ? error.message : '连接失败');
     } finally {
       setSyncing(false);
     }
@@ -235,12 +254,13 @@ export function KnowledgeWorkbench() {
     }
   };
 
-  const refreshKnowledgeViews = async (query = clipQuery) => {
+  const refreshKnowledgeViews = async (query = clipQuery, token = bridgeToken) => {
+    if (!token) return;
     setKnowledgeLoading(true);
     try {
       const [libraryResponse, graphResponse] = await Promise.all([
-        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'clippings', query, limit: 100 }) }),
-        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'graph', prefix: '', limit: 120 }) }),
+        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...bridgeHeaders(token) }, body: JSON.stringify({ action: 'clippings', query, limit: 100 }) }),
+        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...bridgeHeaders(token) }, body: JSON.stringify({ action: 'graph', prefix: '', limit: 120 }) }),
       ]);
       if (!libraryResponse.ok || !graphResponse.ok) throw new Error('读取失败');
       const libraryBody = await libraryResponse.json() as { result?: ClippingsData };
@@ -292,11 +312,13 @@ export function KnowledgeWorkbench() {
         const saved = JSON.parse(localStorage.getItem('workbench-pinned-notes') || '[]');
         setPinnedNotes(Array.isArray(saved) ? saved : []);
       } catch { setPinnedNotes([]); }
+      const savedToken = sessionStorage.getItem(BRIDGE_TOKEN_KEY) || '';
+      setBridgeToken(savedToken);
       setNow(new Date());
       if (savedSettings.autoRefresh) {
-        void refreshBridge();
+        void refreshBridge(savedToken);
         void refreshPulse();
-        void refreshKnowledgeViews('');
+        void refreshKnowledgeViews('', savedToken);
       }
     }, 0);
     return () => {
@@ -304,6 +326,20 @@ export function KnowledgeWorkbench() {
       themeMedia.removeEventListener('change', onThemeChange);
       window.removeEventListener('keydown', onKeyDown);
     };
+  }, []);
+
+  useEffect(() => {
+    const onPair = (event: MessageEvent) => {
+      if (event.origin !== BRIDGE || event.data?.type !== 'cjy-workbench-paired' || typeof event.data.token !== 'string') return;
+      sessionStorage.setItem(BRIDGE_TOKEN_KEY, event.data.token);
+      setBridgeToken(event.data.token);
+      setConnectionError('');
+      setNotice('已授权连接本机 Obsidian，正在读取知识库。');
+      void refreshBridge(event.data.token);
+      void refreshKnowledgeViews('', event.data.token);
+    };
+    window.addEventListener('message', onPair);
+    return () => window.removeEventListener('message', onPair);
   }, []);
 
   useEffect(() => {
@@ -326,6 +362,22 @@ export function KnowledgeWorkbench() {
     setSettings(DEFAULT_SETTINGS);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
     setNotice('工作台设置已恢复默认。');
+  };
+
+  const connectVault = () => {
+    const popup = window.open(`${BRIDGE}/pair?origin=${encodeURIComponent(window.location.origin)}`, 'cjy-workbench-pair', 'popup,width=540,height=560');
+    if (!popup) setConnectionError('浏览器阻止了配对窗口，请允许弹窗后重试');
+  };
+
+  const disconnectVault = () => {
+    sessionStorage.removeItem(BRIDGE_TOKEN_KEY);
+    setBridgeToken('');
+    setBridgeOnline(false);
+    setVaultName('');
+    setConnectionError('已断开本地知识库');
+    setSnapshot(fallbackSnapshot);
+    setClippings({ generatedAt: '', total: 0, items: [] });
+    setGraph({ generatedAt: '', scope: 'Clippings', nodes: [], edges: [], totalNodes: 0, orphanCount: 0 });
   };
 
   const clearLocalState = () => {
@@ -358,10 +410,16 @@ export function KnowledgeWorkbench() {
   };
 
   const bridgeAction = async (payload: Record<string, unknown>) => {
+    if (!bridgeToken) throw new Error('请先在设置中连接自己的 Obsidian');
     const response = await fetch(`${BRIDGE}/action`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...bridgeHeaders(bridgeToken) }, body: JSON.stringify(payload),
     });
-    const data = await response.json() as { error?: string; result?: unknown };
+    const data = await response.json() as { error?: string; code?: string; result?: unknown };
+    if (response.status === 401) {
+      sessionStorage.removeItem(BRIDGE_TOKEN_KEY);
+      setBridgeToken('');
+      setBridgeOnline(false);
+    }
     if (!response.ok || data.error) throw new Error(data.error || '操作失败');
     return data.result;
   };
@@ -494,6 +552,7 @@ export function KnowledgeWorkbench() {
           <div className="plain-header-actions">
             <Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '实时数据' : '本地快照'}</Badge>
             <span>{snapshot.generatedAt ? `更新于 ${shortTime(snapshot.generatedAt)}` : '尚未同步'}</span>
+            <Button variant="outline" onClick={() => setSettingsOpen(true)}><Settings />设置</Button>
             <Button variant="outline" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />刷新</Button>
           </div>
         </header>
@@ -539,7 +598,7 @@ export function KnowledgeWorkbench() {
                 <SectionTitle title="最近修改" />
                 <div className="plain-list">{snapshot.recentNotes.slice(0, 6).map((note) => {
                   const pinned = pinnedNotes.some((item) => item.path === note.path);
-                  return <div key={note.path}><FileText /><a href={obsidianUrl(note.path)}><strong>{note.name}</strong><small>{note.path}</small></a><time>{shortTime(note.updated)}</time><button aria-label={pinned ? `取消固定 ${note.name}` : `固定 ${note.name}`} onClick={() => togglePinnedNote(note)}>{pinned ? <PinOff /> : <Pin />}</button></div>;
+                  return <div key={note.path}><FileText /><a href={obsidianUrl(note.path, vaultName)}><strong>{note.name}</strong><small>{note.path}</small></a><time>{shortTime(note.updated)}</time><button aria-label={pinned ? `取消固定 ${note.name}` : `固定 ${note.name}`} onClick={() => togglePinnedNote(note)}>{pinned ? <PinOff /> : <Pin />}</button></div>;
                 })}</div>
               </section>
               <section className="plain-block">
@@ -550,7 +609,7 @@ export function KnowledgeWorkbench() {
 
             <section className="plain-block plain-pinned">
               <SectionTitle title="固定笔记" note={`${pinnedNotes.length}/8`} />
-              {pinnedNotes.length ? <div className="plain-pinned-grid">{pinnedNotes.map((note) => <article key={note.path}><Pin /><a href={obsidianUrl(note.path)}><strong>{note.name}</strong><small>{note.path}</small></a><button aria-label={`取消固定 ${note.name}`} onClick={() => togglePinnedNote(note)}><X /></button></article>)}</div> : <div className="plain-empty compact"><Pin />在“最近修改”中固定常用笔记</div>}
+              {pinnedNotes.length ? <div className="plain-pinned-grid">{pinnedNotes.map((note) => <article key={note.path}><Pin /><a href={obsidianUrl(note.path, vaultName)}><strong>{note.name}</strong><small>{note.path}</small></a><button aria-label={`取消固定 ${note.name}`} onClick={() => togglePinnedNote(note)}><X /></button></article>)}</div> : <div className="plain-empty compact"><Pin />在“最近修改”中固定常用笔记</div>}
             </section>
           </TabsContent>
 
@@ -561,7 +620,7 @@ export function KnowledgeWorkbench() {
               <section className="plain-block"><SectionTitle title="已逾期" note={`${overdueTasks.length} 项`} /><TaskRows tasks={overdueTasks} isDone={isTaskDone} onToggle={toggleTask} empty="没有逾期任务" /></section>
               <section className="plain-block"><SectionTitle title="接下来" note="按截止日期排序" /><TaskRows tasks={upcomingTasks} isDone={isTaskDone} onToggle={toggleTask} empty="暂无近期任务" /></section>
             </div>
-            <section className="plain-bridge-box"><ShieldCheck /><div><strong>{bridgeOnline ? '本地桥接运行正常' : '本地桥接尚未连接'}</strong><p>桥接只提供统计、扫描、检索、问答和受控写作，不允许删除、移动或执行任意命令。</p></div><Button variant="outline" onClick={refreshBridge}>检查连接</Button></section>
+            <section className="plain-bridge-box"><ShieldCheck /><div><strong>{bridgeOnline ? `${vaultName} 已连接` : '连接自己的 Obsidian'}</strong><p>{bridgeOnline ? '桥接只提供统计、扫描、检索、问答和受控写作，不允许删除、移动或执行任意命令。' : '先在电脑上启动本地桥接，再完成一次本机授权；知识内容不会上传到网页服务器。'}</p></div><Button variant="outline" onClick={bridgeOnline ? () => void refreshBridge() : connectVault}>{bridgeOnline ? '检查连接' : '开始连接'}</Button></section>
           </TabsContent>
 
           <TabsContent value="vault">
@@ -579,27 +638,27 @@ export function KnowledgeWorkbench() {
               <div><strong>{clippings.generatedAt ? clippings.total : 0}</strong><span>篇 Clippings 内容</span><small>原文件保持在原目录，工作台只读展示</small></div>
               <form onSubmit={(event) => { event.preventDefault(); void refreshKnowledgeViews(clipQuery); }}><Input value={clipQuery} onChange={(event) => setClipQuery(event.target.value)} aria-label="检索 Clippings" placeholder="检索标题、正文或路径" /><Button type="submit" variant="outline" disabled={knowledgeLoading}><Search />检索</Button></form>
             </div>
-            <div className="plain-clippings-list">{clippings.items.length ? clippings.items.map((item) => <article key={item.path}><div><Badge variant="outline">{item.section === 'raw' ? '原始资料' : '结构化知识'}</Badge><span>{item.links} 条链接</span><time>{shortTime(item.updated)}</time></div><h2>{item.title}</h2><p>{item.preview || '暂无可显示的摘要'}</p><footer><small>{item.path}</small><a href={obsidianUrl(item.path)}>在 Obsidian 打开<ExternalLink /></a></footer></article>) : <div className="plain-empty"><Library />连接本地桥接后显示 Clippings 内容</div>}</div>
+            <div className="plain-clippings-list">{clippings.items.length ? clippings.items.map((item) => <article key={item.path}><div><Badge variant="outline">{item.section === 'raw' ? '原始资料' : '结构化知识'}</Badge><span>{item.links} 条链接</span><time>{shortTime(item.updated)}</time></div><h2>{item.title}</h2><p>{item.preview || '暂无可显示的摘要'}</p><footer><small>{item.path}</small><a href={obsidianUrl(item.path, vaultName)}>在 Obsidian 打开<ExternalLink /></a></footer></article>) : <div className="plain-empty"><Library />连接本地桥接后显示 Clippings 内容</div>}</div>
           </TabsContent>
 
           <TabsContent value="graph">
             <div className="plain-graph-summary"><div><strong>{graph.generatedAt ? graph.totalNodes : 0}</strong><span>图谱节点</span></div><div><strong>{graph.edges.length}</strong><span>显式关系</span></div><div><strong>{graph.orphanCount}</strong><span>孤立节点</span></div><Button variant="outline" onClick={() => void refreshKnowledgeViews()} disabled={knowledgeLoading}><RefreshCw className={knowledgeLoading ? 'spin' : ''} />刷新图谱</Button></div>
-            <RelationGraph data={graph} selected={selectedNode} onSelect={setSelectedNode} />
+            <RelationGraph data={graph} selected={selectedNode} onSelect={setSelectedNode} vaultName={vaultName} />
           </TabsContent>
 
           <TabsContent value="review">
             <div className="plain-review-focus">
               <div><span>本次回顾</span><strong>{reviewPath ? reviewPath.replace(/\.md$/, '').split('/').pop() : '暂无待回顾笔记'}</strong><small>{reviewPath || '当前没有长期未更新或孤立笔记'}</small></div>
-              <div>{reviewPath && <a href={obsidianUrl(reviewPath)}>在 Obsidian 打开<ExternalLink /></a>}<Button variant="outline" onClick={() => setReviewIndex((index) => reviewCandidates.length ? (index + 1) % reviewCandidates.length : 0)} disabled={!reviewCandidates.length}><RefreshCw />换一篇</Button></div>
+              <div>{reviewPath && <a href={obsidianUrl(reviewPath, vaultName)}>在 Obsidian 打开<ExternalLink /></a>}<Button variant="outline" onClick={() => setReviewIndex((index) => reviewCandidates.length ? (index + 1) % reviewCandidates.length : 0)} disabled={!reviewCandidates.length}><RefreshCw />换一篇</Button></div>
             </div>
             <div className="plain-two-columns">
-              <section className="plain-block"><SectionTitle title="长期未更新" note={`${snapshot.issues.stale.length} 篇`} /><div className="plain-review-list">{snapshot.issues.stale.length ? snapshot.issues.stale.map((path) => <a href={obsidianUrl(path)} key={path}><History /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有长期未更新笔记</div>}</div></section>
-              <section className="plain-block"><SectionTitle title="孤立笔记" note={`${snapshot.issues.orphans.length} 篇`} /><div className="plain-review-list">{snapshot.issues.orphans.length ? snapshot.issues.orphans.map((path) => <a href={obsidianUrl(path)} key={path}><Network /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有孤立笔记</div>}</div></section>
+              <section className="plain-block"><SectionTitle title="长期未更新" note={`${snapshot.issues.stale.length} 篇`} /><div className="plain-review-list">{snapshot.issues.stale.length ? snapshot.issues.stale.map((path) => <a href={obsidianUrl(path, vaultName)} key={path}><History /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有长期未更新笔记</div>}</div></section>
+              <section className="plain-block"><SectionTitle title="孤立笔记" note={`${snapshot.issues.orphans.length} 篇`} /><div className="plain-review-list">{snapshot.issues.orphans.length ? snapshot.issues.orphans.map((path) => <a href={obsidianUrl(path, vaultName)} key={path}><Network /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有孤立笔记</div>}</div></section>
             </div>
           </TabsContent>
 
           <TabsContent value="blog">
-            <BlogWorkbench bridge={BRIDGE} bridgeOnline={bridgeOnline} onBridgeState={setBridgeOnline} onNotice={setNotice} />
+            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} onBridgeState={setBridgeOnline} onNotice={setNotice} />
           </TabsContent>
 
           <TabsContent value="pulse">
@@ -655,8 +714,12 @@ export function KnowledgeWorkbench() {
             <section>
               <h3>本地连接</h3>
               <div className="plain-setting-row">
-                <span><strong>Obsidian 桥接</strong><small>{bridgeOnline ? '已连接，可读取实时知识库数据' : '未连接，工作台显示最近快照'}</small></span>
-                <div className="plain-setting-action"><Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '已连接' : '未连接'}</Badge><Button variant="outline" size="sm" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />重试</Button></div>
+                <span><strong>{bridgeOnline ? vaultName : 'Obsidian 桥接'}</strong><small>{bridgeOnline ? '已授权当前页面读取这个 Vault' : connectionError}</small></span>
+                <div className="plain-setting-action"><Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '已连接' : '未连接'}</Badge><Button size="sm" onClick={connectVault}>连接自己的 Obsidian</Button>{bridgeToken && <Button variant="outline" size="sm" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />重试</Button>}{bridgeToken && <Button variant="outline" size="sm" onClick={disconnectVault}>断开</Button>}</div>
+              </div>
+              <div className="plain-setting-row plain-setting-help">
+                <span><strong>首次使用</strong><small>下载项目后运行：npm run bridge -- --vault “你的 Vault 路径”，再点击上方连接按钮。</small></span>
+                <a href="https://github.com/CJY0722/cjy-knowledge-workbench#连接自己的-obsidian" target="_blank" rel="noreferrer">查看接入说明<ExternalLink /></a>
               </div>
             </section>
 

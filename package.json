@@ -7,6 +7,7 @@
   },
   "scripts": {
     "dev": "vinext dev",
+    "bridge": "node bridge.mjs",
     "build": "vinext build",
     "build:pages": "vite build --config vite.pages.config.ts",
     "start": "wrangler dev --config dist/server/wrangler.json",

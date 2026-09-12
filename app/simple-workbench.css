@@ -401,7 +401,10 @@
 .plain-setting-row [data-slot="switch"] { background: #c6ccc6; }
 .plain-setting-row [data-slot="switch"][data-checked] { background: var(--plain-accent); }
 .plain-setting-row [data-slot="switch-thumb"] { background: #fff; }
-.plain-setting-action { display: flex; align-items: center; gap: 8px; }
+.plain-setting-action { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.plain-setting-help a { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: var(--plain-accent); font-size: 12px; font-weight: 600; text-decoration: none; }
+.plain-setting-help a:hover { text-decoration: underline; }
+.plain-setting-help a svg { width: 14px; }
 .plain-setting-reset [data-slot="button"] { min-width: 82px; }
 .plain-dialog .plain-danger-button { color: #9b3b35; border-color: #ddb8b4; background: #fff8f7; }
 .plain-setting-select { color: #20241f; border: 1px solid #cdd2ca; background: #fbfbf9; }

@@ -4,9 +4,64 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createPublishPack, generateDraft, listDrafts, prepareCsdnPayload,
+  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, prepareCsdnPayload,
   previewClosure, reviewCsdnDraft, sanitizeFileName, saveDraft, searchNotes, writingPreflight,
 } from './bridge.mjs';
+
+test('protects a personal vault behind origin checks and pairing', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-bridge-'));
+  await mkdir(path.join(root, '.obsidian'));
+  const { server } = createBridge({ root, port: 0, allowedOrigins: ['https://example.github.io'] });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const url = `http://127.0.0.1:${address.port}`;
+  try {
+    const blocked = await fetch(`${url}/health`, { headers: { Origin: 'https://evil.example', 'X-Workbench-Token': 'not-authorized' } });
+    assert.equal(blocked.status, 403);
+
+    const unpaired = await fetch(`${url}/health`, { headers: { Origin: 'https://example.github.io' } });
+    assert.equal(unpaired.status, 401);
+
+    const preflight = await fetch(`${url}/health`, { method: 'OPTIONS', headers: { Origin: 'https://example.github.io', 'Access-Control-Request-Private-Network': 'true' } });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
+
+    const pairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://example.github.io')}`);
+    assert.equal(pairing.status, 200);
+    const pairingHtml = await pairing.text();
+    assert.match(pairingHtml, /允许连接/);
+    const nonce = pairingHtml.match(/name="nonce" value="([^"]+)"/)?.[1];
+    assert.ok(nonce);
+
+    const approval = await fetch(`${url}/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ origin: 'https://example.github.io', nonce }),
+    });
+    assert.equal(approval.status, 200);
+    const approvalHtml = await approval.text();
+    assert.match(approvalHtml, /连接成功/);
+    const pairedToken = approvalHtml.match(/"token":"([^"]+)"/)?.[1];
+    assert.ok(pairedToken);
+
+    const healthResponse = await fetch(`${url}/health`, { headers: { Origin: 'https://example.github.io', 'X-Workbench-Token': pairedToken } });
+    assert.equal(healthResponse.status, 200);
+    const health = await healthResponse.json();
+    assert.equal(health.vault_name, path.basename(root));
+    assert.equal(health.vault_exists, true);
+    assert.equal(health.obsidian_configured, true);
+    assert.equal('vault' in health, false);
+
+    const forbiddenPairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://evil.example')}`);
+    assert.equal(forbiddenPairing.status, 403);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
 
 test('sanitizes draft names', () => {
   assert.equal(sanitizeFileName('Java: 入门/实践?'), 'Java- 入门-实践-');

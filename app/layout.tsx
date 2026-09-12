@@ -2,19 +2,19 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://self-growing-knowledge-workbench.owatkins477.chatgpt.site'),
+  metadataBase: new URL('https://cjy0722.github.io/cjy-knowledge-workbench/'),
   title: '自生长知识库 · 智能体工作台',
   description: 'Obsidian、Python、MCP、向量检索与 Agent 组成的本地优先知识工作台。',
   openGraph: {
     title: '自生长知识库 · 智能体工作台',
     description: 'Obsidian、Python、MCP、向量检索与 Agent 组成的本地优先知识工作台。',
-    images: ['/og.png'],
+    images: ['og.png'],
   },
   twitter: {
     card: 'summary_large_image',
     title: '自生长知识库 · 智能体工作台',
     description: 'Obsidian、Python、MCP、向量检索与 Agent 组成的本地优先知识工作台。',
-    images: ['/og.png'],
+    images: ['og.png'],
   },
 };
 

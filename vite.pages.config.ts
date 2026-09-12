@@ -6,6 +6,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: 'github-pages',
   base: './',
+  publicDir: '../public',
   css: { postcss: { plugins: [tailwindcss()] } },
   plugins: [react()],
   resolve: {

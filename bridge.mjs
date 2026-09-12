@@ -1,17 +1,65 @@
 import http from 'node:http';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const DEFAULT_VAULT = 'E:\\ObsidianVault';
+const DEFAULT_VAULT = process.env.OBSIDIAN_VAULT || path.join(process.cwd(), '.obsidian-vault-not-configured');
 const DEFAULT_PORT = 8766;
-const ORIGINS = new Set(['http://localhost:3000', 'http://127.0.0.1:3000']);
+const DEFAULT_ORIGINS = new Set([
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://cjy0722.github.io',
+]);
 const IGNORED = new Set(['.obsidian', '.git', 'node_modules', '.data']);
 
 function apiError(message, code = 'bad_request') {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function normalizeOrigin(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin === 'null') throw new Error();
+    return url.origin;
+  } catch {
+    throw apiError(`无效网页来源：${value || '空值'}`, 'invalid_origin');
+  }
+}
+
+function safeTokenEqual(left, right) {
+  const actual = Buffer.from(String(left || ''));
+  const expected = Buffer.from(String(right || ''));
+  return actual.length === expected.length && actual.length > 0 && timingSafeEqual(actual, expected);
+}
+
+async function readRequestBody(request, limit = 2_000_000) {
+  let raw = '';
+  for await (const chunk of request) {
+    raw += chunk;
+    if (raw.length > limit) throw apiError('请求内容过大', 'payload_too_large');
+  }
+  return raw;
+}
+
+async function vaultStatus(vault) {
+  const vaultExists = await fs.stat(vault).then(stat => stat.isDirectory()).catch(() => false);
+  const obsidianConfigured = vaultExists && await fs.stat(path.join(vault, '.obsidian')).then(stat => stat.isDirectory()).catch(() => false);
+  return { vault_exists: vaultExists, obsidian_configured: obsidianConfigured };
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function pairingPage({ origin, vaultName, nonce = '', token = '', error = '' }) {
+  const approved = Boolean(token);
+  const action = error ? '' : approved
+    ? `<script>window.opener?.postMessage(${JSON.stringify({ type: 'cjy-workbench-paired', token })}, ${JSON.stringify(origin)}); window.close();</script>`
+    : `<form method="post" action="/pair"><input type="hidden" name="origin" value="${escapeHtml(origin)}"><input type="hidden" name="nonce" value="${escapeHtml(nonce)}"><button type="submit">允许连接</button></form>`;
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>连接 Obsidian</title><style>body{max-width:520px;margin:12vh auto;padding:24px;font:16px/1.7 system-ui;color:#20241f;background:#f7f8f5}main{padding:28px;border:1px solid #dfe2dc;border-radius:12px;background:white}code{word-break:break-all}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;color:white;background:#35624a;font-weight:700}</style><main><h1>${error || (approved ? '连接成功' : '连接自己的 Obsidian')}</h1><p>${approved ? '授权已发送到工作台，可以关闭此窗口。' : `知识库：<strong>${escapeHtml(vaultName)}</strong><br>请求来源：<code>${escapeHtml(origin)}</code>${error ? '' : '<br>允许后，该网页可以通过本机桥接读写此知识库。'}`}</p>${action}</main></html>`;
 }
 
 export function sanitizeFileName(value) {
@@ -725,32 +773,61 @@ async function route(action, data, root) {
   throw apiError('未知动作', 'unknown_action');
 }
 
-export function createBridge({ root = process.env.OBSIDIAN_VAULT || DEFAULT_VAULT, port = Number(process.env.WORKBENCH_PORT || DEFAULT_PORT) } = {}) {
+export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(process.env.WORKBENCH_PORT || DEFAULT_PORT), allowedOrigins = [], token = process.env.WORKBENCH_TOKEN || '' } = {}) {
+  if (!root) throw apiError('未配置 Obsidian Vault，请使用 --vault 指定路径', 'vault_required');
   const vault = path.resolve(root);
+  const origins = new Set(DEFAULT_ORIGINS);
+  const configuredOrigins = [...String(process.env.WORKBENCH_ORIGINS || '').split(','), ...allowedOrigins].map(value => String(value).trim()).filter(Boolean);
+  for (const origin of configuredOrigins) origins.add(normalizeOrigin(origin));
+  const tokens = new Set(token ? [token] : []);
+  const pairingNonces = new Map();
   const server = http.createServer(async (request, response) => {
     const origin = request.headers.origin;
-    const allowed = ORIGINS.has(origin);
+    const allowed = !origin || origins.has(origin);
     const send = (status, payload) => {
       const body = JSON.stringify(payload);
-      response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...(allowed ? { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Private-Network': 'true', Vary: 'Origin' } : {}) });
+      response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', ...(origin && allowed ? { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Private-Network': 'true', Vary: 'Origin' } : {}) });
       response.end(body);
     };
-    if (request.method === 'OPTIONS') {
-      if (!allowed) return send(403, { error: '来源未获允许', code: 'origin_not_allowed' });
-      response.writeHead(204, { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Private-Network': 'true', Vary: 'Origin' });
-      return response.end();
-    }
+    const sendHtml = (status, body) => {
+      response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" });
+      response.end(body);
+    };
     try {
-      if (request.method === 'GET' && request.url === '/health') return send(200, { connected: true, vault, vault_exists: await fs.stat(vault).then(stat => stat.isDirectory()).catch(() => false), openai_configured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY_HERE') });
-      if (request.method === 'GET' && request.url === '/snapshot') return send(200, await snapshot(vault));
-      if (request.method !== 'POST' || request.url !== '/action') return send(404, { error: '未找到接口', code: 'not_found' });
-      if (!allowed) return send(403, { error: '来源未获允许', code: 'origin_not_allowed' });
-      let raw = '';
-      for await (const chunk of request) {
-        raw += chunk;
-        if (raw.length > 2_000_000) throw apiError('请求内容过大', 'payload_too_large');
+      const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
+      if (requestUrl.pathname === '/pair' && request.method === 'GET') {
+        const requestedOrigin = normalizeOrigin(requestUrl.searchParams.get('origin'));
+        if (!origins.has(requestedOrigin)) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '来源未获允许' }));
+        const nonce = randomBytes(18).toString('base64url');
+        pairingNonces.set(nonce, { origin: requestedOrigin, expires: Date.now() + 5 * 60_000 });
+        for (const [key, value] of pairingNonces) if (value.expires < Date.now()) pairingNonces.delete(key);
+        return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), nonce }));
       }
-      const data = JSON.parse(raw || '{}');
+      if (requestUrl.pathname === '/pair' && request.method === 'POST') {
+        const form = new URLSearchParams(await readRequestBody(request, 10_000));
+        const nonce = form.get('nonce') || '';
+        const requestedOrigin = normalizeOrigin(form.get('origin'));
+        const pairing = pairingNonces.get(nonce);
+        pairingNonces.delete(nonce);
+        if (!pairing || pairing.expires < Date.now() || pairing.origin !== requestedOrigin || !origins.has(requestedOrigin)) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '配对请求已失效' }));
+        const pairedToken = randomBytes(24).toString('base64url');
+        tokens.add(pairedToken);
+        return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), token: pairedToken }));
+      }
+      if (request.method === 'OPTIONS') {
+        if (!origin || !allowed) return send(403, { error: '来源未获允许', code: 'origin_not_allowed' });
+        response.writeHead(204, { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Workbench-Token', 'Access-Control-Allow-Private-Network': 'true', 'Cache-Control': 'no-store', Vary: 'Origin' });
+        return response.end();
+      }
+      if (!allowed) return send(403, { error: '来源未获允许', code: 'origin_not_allowed' });
+      const suppliedToken = request.headers['x-workbench-token'];
+      if (![...tokens].some(value => safeTokenEqual(suppliedToken, value))) return send(401, { error: '请先在工作台设置中完成本地配对', code: 'pairing_required' });
+      const status = await vaultStatus(vault);
+      if (request.method === 'GET' && requestUrl.pathname === '/health') return send(200, { connected: true, vault_name: path.basename(vault), ...status, openai_configured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY_HERE') });
+      if (!status.vault_exists || !status.obsidian_configured) return send(400, { error: '指定目录不是可用的 Obsidian Vault', code: 'invalid_vault' });
+      if (request.method === 'GET' && requestUrl.pathname === '/snapshot') return send(200, await snapshot(vault));
+      if (request.method !== 'POST' || requestUrl.pathname !== '/action') return send(404, { error: '未找到接口', code: 'not_found' });
+      const data = JSON.parse(await readRequestBody(request) || '{}');
       send(200, { ok: true, result: await route(data.action, data, vault) });
     } catch (error) { send(error.code === 'ENOENT' ? 404 : 400, { error: error.message, code: error.code || 'bad_request' }); }
   });
@@ -758,6 +835,20 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT || DEFAULT_VAUL
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { server, port, vault } = createBridge();
-  server.listen(port, '127.0.0.1', () => console.log(`CJY Workbench Bridge: http://127.0.0.1:${port} -> ${vault}`));
+  const values = name => process.argv.slice(2).flatMap((value, index, args) => value === name && args[index + 1] ? [args[index + 1]] : []);
+  const root = values('--vault')[0] || process.env.OBSIDIAN_VAULT;
+  try {
+    const { server, port, vault } = createBridge({ root, allowedOrigins: values('--origin') });
+    const status = await vaultStatus(vault);
+    if (!status.vault_exists || !status.obsidian_configured) throw apiError('指定目录不是可用的 Obsidian Vault', 'invalid_vault');
+    server.listen(port, '127.0.0.1', () => {
+      console.log(`CJY Workbench Bridge: http://127.0.0.1:${port}`);
+      console.log(`Obsidian Vault: ${path.basename(vault)}`);
+      console.log('请在工作台设置中点击“连接自己的 Obsidian”完成授权。');
+    });
+  } catch (error) {
+    console.error(`桥接启动失败：${error.message}`);
+    console.error('用法：npm run bridge -- --vault "你的 Obsidian Vault 路径"');
+    process.exitCode = 1;
+  }
 }
