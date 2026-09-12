@@ -6,6 +6,8 @@
 
 仓库包含独立的静态构建和 GitHub Actions 发布流程。推送到 `main` 后会自动部署公开演示页面：
 
+公开网址：<https://cjy0722.github.io/cjy-knowledge-workbench/#blog>
+
 ```powershell
 npm run build:pages
 ```
