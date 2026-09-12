@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import {
   Activity, BookOpen, Bot, CalendarDays, Check, CheckCircle2, Circle,
   Command, Database, ExternalLink, FileText, GitBranch, History, Inbox, Library, Link2, ListTodo,
-  Network, Pin, PinOff, RefreshCw, Rss, Search, Settings, ShieldCheck, Sparkles,
+  Network, PenLine, Pin, PinOff, RefreshCw, Rss, Search, Settings, ShieldCheck, Sparkles,
   TriangleAlert, X,
 } from 'lucide-react';
 
@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { BlogWorkbench } from './blog-workbench';
 import './simple-workbench.css';
 
 type Task = { title: string; path: string; done: boolean; dueDate?: string | null; priority?: string };
@@ -65,53 +66,32 @@ type WorkbenchSettings = {
   autoRefresh: boolean;
 };
 
-const BRIDGE = 'http://127.0.0.1:8765';
+const BRIDGE = 'http://127.0.0.1:8766';
+const EXPECTED_VAULT = 'E:\\ObsidianVault';
 const SETTINGS_KEY = 'workbench-settings';
 const DEFAULT_SETTINGS: WorkbenchSettings = { startTab: 'overview', theme: 'system', density: 'comfortable', autoRefresh: true };
 const TAB_OPTIONS = [
   ['overview', '概览'], ['today', '今日'], ['vault', '知识库'], ['clippings', '剪藏'],
-  ['graph', '图谱'], ['review', '回顾'], ['pulse', '资讯'],
+  ['graph', '图谱'], ['review', '回顾'], ['blog', '博客写作'], ['pulse', '资讯'],
 ];
-const fallbackBase = Date.UTC(2026, 8, 4);
+const fallbackBase = Date.now();
 const fallbackActivity = Array.from({ length: 84 }, (_, index) => ({
   date: new Date(fallbackBase - (83 - index) * 86400000).toISOString().slice(0, 10),
   count: [0, 0, 1, 0, 2, 0, 0, 3, 1, 0, 4, 0][index % 12],
 }));
 
 const fallbackSnapshot: Snapshot = {
-  generatedAt: '2026-09-04T00:00:00+08:00', notes: 164, chunks: 3360,
-  healthScore: 92, linkIntegrity: 99, metadataCoverage: 79, inboxCount: 2, taskFlow: 0,
-  tasks: [
-    { title: '整理新增收件箱', path: '00-收件箱', done: false, dueDate: '2026-09-05', priority: '高' },
-    { title: '更新向量索引', path: '20-项目/智能体工作台', done: false, dueDate: '2026-09-06', priority: '普通' },
-    { title: '回流项目经验与方法', path: '40-资源', done: false },
-  ],
-  recentNotes: [
-    { name: '知识库运行日志', path: '40-资源/知识库运行日志.md', updated: '2026-09-04T00:00:00+08:00' },
-    { name: '知识库智能体操作中心', path: '30-领域/知识库智能体操作中心.md', updated: '2026-09-04T00:00:00+08:00' },
-    { name: '知识库索引', path: '40-资源/知识库索引.md', updated: '2026-09-04T00:00:00+08:00' },
-  ],
+  generatedAt: '', notes: 0, chunks: 0,
+  healthScore: 0, linkIntegrity: 0, metadataCoverage: 0, inboxCount: 0, taskFlow: 0,
+  tasks: [],
+  recentNotes: [],
   activity: fallbackActivity,
   issues: { brokenLinks: [], orphans: [], stale: [] },
 };
 
 const fallbackPulse: PulseData = {
-  updatedAt: '2026-09-04T00:00:00+08:00',
-  rss: [
-    { title: '本地优先知识系统的新实践', url: '#', source: '资讯订阅' },
-    { title: '智能体工作流的近期进展', url: '#', source: '技术社区' },
-  ],
-  github: [
-    { title: 'agentic-workbench', url: '#', description: '本地智能体工作台', stars: 1280 },
-    { title: 'knowledge-graph-rag', url: '#', description: '面向笔记的知识图谱检索', stars: 842 },
-  ],
+  updatedAt: '', rss: [], github: [],
 };
-
-const usage = [
-  { name: '三小时额度', value: 16, detail: '32k / 200k' },
-  { name: '本周额度', value: 38, detail: '1.9m / 5m' },
-  { name: '本期额度', value: 57, detail: '14.2m / 25m' },
-];
 
 function shortTime(value: string) {
   const date = new Date(value);
@@ -149,7 +129,7 @@ function TaskRows({ tasks, isDone, onToggle, empty = '暂无任务' }: { tasks: 
 }
 
 function obsidianUrl(path: string) {
-  return `obsidian://open?vault=${encodeURIComponent('自生长知识库')}&file=${encodeURIComponent(path)}`;
+  return `obsidian://open?vault=${encodeURIComponent('ObsidianVault')}&file=${encodeURIComponent(path)}`;
 }
 
 function RelationGraph({ data, selected, onSelect }: { data: GraphData; selected: string; onSelect(path: string): void }) {
@@ -226,8 +206,13 @@ export function KnowledgeWorkbench() {
   const refreshBridge = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${BRIDGE}/snapshot`, { cache: 'no-store' });
-      if (!response.ok) throw new Error('连接失败');
+      const [response, healthResponse] = await Promise.all([
+        fetch(`${BRIDGE}/snapshot`, { cache: 'no-store' }),
+        fetch(`${BRIDGE}/health`, { cache: 'no-store' }),
+      ]);
+      if (!response.ok || !healthResponse.ok) throw new Error('连接失败');
+      const health = await healthResponse.json() as { vault?: string; vault_exists?: boolean };
+      if (!health.vault_exists || String(health.vault || '').replace(/\\+$/, '').toLowerCase() !== EXPECTED_VAULT.toLowerCase()) throw new Error(`桥接必须连接 ${EXPECTED_VAULT}`);
       setSnapshot(await response.json());
       setBridgeOnline(true);
     } catch {
@@ -255,7 +240,7 @@ export function KnowledgeWorkbench() {
     try {
       const [libraryResponse, graphResponse] = await Promise.all([
         fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'clippings', query, limit: 100 }) }),
-        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'graph', prefix: 'Clippings', limit: 120 }) }),
+        fetch(`${BRIDGE}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'graph', prefix: '', limit: 120 }) }),
       ]);
       if (!libraryResponse.ok || !graphResponse.ok) throw new Error('读取失败');
       const libraryBody = await libraryResponse.json() as { result?: ClippingsData };
@@ -383,10 +368,10 @@ export function KnowledgeWorkbench() {
 
   const runIndex = async () => {
     setActionBusy(true);
-    setNotice('正在更新本地索引...');
+    setNotice('正在重新扫描本地知识库...');
     try {
-      const response = await bridgeAction({ action: 'index' }) as { changed_files?: number; written_chunks?: number; total_chunks?: number };
-      setNotice(`索引已更新：处理 ${response.changed_files ?? 0} 篇变化笔记，新增 ${response.written_chunks ?? 0} 个片段。`);
+      const response = await bridgeAction({ action: 'index' }) as { mode?: string; total_notes?: number };
+      setNotice(`知识库扫描完成：已核对 ${response.total_notes ?? 0} 篇笔记。当前 Node 桥接不维护向量索引。`);
       await refreshBridge();
     } catch {
       setNotice('无法连接本地桥接，请先启动桥接服务。');
@@ -411,7 +396,7 @@ export function KnowledgeWorkbench() {
       setBridgeOnline(true);
     } catch (error) {
       setBridgeOnline(false);
-      setResult(`本地桥接调用失败：${error instanceof Error ? error.message : '未知错误'}\n\n请先运行 start-dashboard-bridge.ps1`);
+      setResult(`本地桥接调用失败：${error instanceof Error ? error.message : '未知错误'}\n\n请在工作台目录运行 node bridge.mjs`);
     } finally {
       setActionBusy(false);
     }
@@ -444,7 +429,7 @@ export function KnowledgeWorkbench() {
       setBridgeOnline(true);
     } catch (error) {
       setBridgeOnline(false);
-      setResult(`本地桥接调用失败：${error instanceof Error ? error.message : '未知错误'}\n\n请先运行 start-dashboard-bridge.ps1`);
+      setResult(`本地桥接调用失败：${error instanceof Error ? error.message : '未知错误'}\n\n请在工作台目录运行 node bridge.mjs`);
     } finally {
       setActionBusy(false);
     }
@@ -463,22 +448,28 @@ export function KnowledgeWorkbench() {
   const upcomingTasks = datedTasks.filter((task) => !isTaskDone(task) && String(task.dueDate) > todayIso).slice(0, 6);
   const reviewCandidates = [...new Set([...snapshot.issues.stale, ...snapshot.issues.orphans])];
   const reviewPath = reviewCandidates.length ? reviewCandidates[reviewIndex % reviewCandidates.length] : '';
+  const knowledgeIndicators = [
+    { name: '元数据覆盖', value: snapshot.metadataCoverage, detail: '标签与创建日期' },
+    { name: '链接完整度', value: snapshot.linkIntegrity, detail: 'WikiLink 可解析比例' },
+    { name: '任务完成', value: taskPercent, detail: `${completed}/${tasks.length || 0} 项` },
+  ];
   const commandItems = [
     { label: '打开概览', detail: '回到知识库总览', run: () => changeTab('overview') },
     { label: '查看任务日程', detail: '查看今天、逾期和近期任务', run: () => changeTab('today') },
     { label: '查看固定笔记', detail: '回到概览中的固定笔记', run: () => changeTab('overview') },
     { label: '知识回顾', detail: '重新发现长期未更新或孤立笔记', run: () => changeTab('review') },
+    { label: '博客写作', detail: '从知识预检到发布与收尾', run: () => changeTab('blog') },
     { label: '搜索笔记', detail: '通过本地桥接检索知识库', run: () => openDialog('search') },
     { label: '存入收件箱', detail: '快速保存一条资料', run: () => openDialog('capture') },
     { label: '今日简报', detail: '生成当前行动建议', run: () => void runBrief() },
-    { label: '更新索引', detail: '索引新增和变化的笔记', run: () => void runIndex() },
+    { label: '重新扫描知识库', detail: '刷新笔记统计与健康状态', run: () => void runIndex() },
     { label: '工作台设置', detail: '调整启动页、外观与刷新', run: () => setSettingsOpen(true) },
   ].filter((item) => `${item.label} ${item.detail}`.toLocaleLowerCase('zh-CN').includes(commandQuery.trim().toLocaleLowerCase('zh-CN')));
 
   return (
     <main className="plain-app" data-theme={appliedTheme} data-density={settings.density}>
       <aside className="plain-sidebar">
-        <div className="plain-brand"><BookOpen /><div><strong>自生长知识库</strong><span>个人知识工作台</span></div></div>
+        <div className="plain-brand"><BookOpen /><div><strong>CJY 知识工作台</strong><span>知识管理与博客写作</span></div></div>
         <Tabs value={tab} onValueChange={changeTab} orientation="vertical" className="plain-nav-tabs">
           <TabsList className="plain-nav" aria-label="工作台导航">
             <TabsTrigger value="overview"><Activity />概览</TabsTrigger>
@@ -487,6 +478,7 @@ export function KnowledgeWorkbench() {
             <TabsTrigger value="clippings"><Library />剪藏</TabsTrigger>
             <TabsTrigger value="graph"><Network />图谱</TabsTrigger>
             <TabsTrigger value="review"><History />回顾</TabsTrigger>
+            <TabsTrigger value="blog"><PenLine />博客写作</TabsTrigger>
             <TabsTrigger value="pulse"><Rss />资讯</TabsTrigger>
           </TabsList>
         </Tabs>
@@ -498,25 +490,25 @@ export function KnowledgeWorkbench() {
 
       <section className="plain-main">
         <header className="plain-header">
-          <div><h1>知识工作台</h1><p>查看知识库状态，处理资料，调用本地智能体。</p></div>
+          <div><h1>{tab === 'blog' ? 'AI 博客写作工作台' : '知识工作台'}</h1><p>{tab === 'blog' ? '从知识预检、初稿审核到发布与收尾，全程保留人工门禁。' : '查看知识库状态，处理资料，调用本地智能体。'}</p></div>
           <div className="plain-header-actions">
             <Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '实时数据' : '本地快照'}</Badge>
-            <span>更新于 {shortTime(snapshot.generatedAt)}</span>
+            <span>{snapshot.generatedAt ? `更新于 ${shortTime(snapshot.generatedAt)}` : '尚未同步'}</span>
             <Button variant="outline" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />刷新</Button>
           </div>
         </header>
 
-        <div className="plain-tools" aria-label="常用操作">
+        {tab !== 'blog' && <div className="plain-tools" aria-label="常用操作">
           <Button onClick={() => openDialog('research')}><Sparkles />深度研究</Button>
           <Button variant="outline" onClick={() => openDialog('search')}><Search />搜索笔记</Button>
           <Button variant="outline" onClick={() => openDialog('connections')} disabled={actionBusy}><Link2 />查看关联</Button>
           <Button variant="outline" onClick={() => void runBrief()} disabled={actionBusy}><CalendarDays />今日简报</Button>
           <Button variant="outline" onClick={() => openDialog('capture')}><Inbox />存入收件箱</Button>
-          <Button variant="outline" onClick={runIndex} disabled={actionBusy}><Database />更新索引</Button>
+          <Button variant="outline" onClick={runIndex} disabled={actionBusy}><Database />重新扫描</Button>
           <Button variant="outline" onClick={() => { changeTab('pulse'); void refreshPulse(); }} disabled={pulseLoading}><Rss />更新资讯</Button>
           <Button variant="outline" onClick={() => setSettingsOpen(true)}><Settings />设置</Button>
           <Button variant="outline" onClick={() => setCommandOpen(true)}><Command />命令面板 <kbd>Ctrl K</kbd></Button>
-        </div>
+        </div>}
 
         {notice && <div className="plain-notice"><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice('')}><X /></button></div>}
 
@@ -526,7 +518,7 @@ export function KnowledgeWorkbench() {
               <Score label="知识库健康度" value={snapshot.healthScore} note="整体运行稳定" />
               <Score label="笔记总数" value={snapshot.notes} note="已纳入统计" />
               <Score label="待整理资料" value={snapshot.inboxCount} note="位于收件箱" />
-              <Score label="向量片段" value={snapshot.chunks} note="用于语义检索" />
+              <Score label="任务总数" value={snapshot.tasks.length} note="从 Obsidian 任务识别" />
             </section>
 
             <div className="plain-overview-grid">
@@ -537,8 +529,8 @@ export function KnowledgeWorkbench() {
               </section>
 
               <section className="plain-block plain-usage">
-                <SectionTitle title="模型用量" note="仅作当前使用参考" />
-                {usage.map((item) => <div className="plain-usage-row" key={item.name}><div><span>{item.name}</span><small>{item.detail}</small></div><strong>{item.value}%</strong><i><b style={{ width: `${item.value}%` }} /></i></div>)}
+                <SectionTitle title="知识质量" note="来自当前知识库快照" />
+                {knowledgeIndicators.map((item) => <div className="plain-usage-row" key={item.name}><div><span>{item.name}</span><small>{item.detail}</small></div><strong>{item.value}%</strong><i><b style={{ width: `${item.value}%` }} /></i></div>)}
               </section>
             </div>
 
@@ -569,7 +561,7 @@ export function KnowledgeWorkbench() {
               <section className="plain-block"><SectionTitle title="已逾期" note={`${overdueTasks.length} 项`} /><TaskRows tasks={overdueTasks} isDone={isTaskDone} onToggle={toggleTask} empty="没有逾期任务" /></section>
               <section className="plain-block"><SectionTitle title="接下来" note="按截止日期排序" /><TaskRows tasks={upcomingTasks} isDone={isTaskDone} onToggle={toggleTask} empty="暂无近期任务" /></section>
             </div>
-            <section className="plain-bridge-box"><ShieldCheck /><div><strong>{bridgeOnline ? '本地桥接运行正常' : '本地桥接尚未连接'}</strong><p>桥接只提供统计、索引、检索、问答和收件箱新增，不允许删除、移动或执行任意命令。</p></div><Button variant="outline" onClick={refreshBridge}>检查连接</Button></section>
+            <section className="plain-bridge-box"><ShieldCheck /><div><strong>{bridgeOnline ? '本地桥接运行正常' : '本地桥接尚未连接'}</strong><p>桥接只提供统计、扫描、检索、问答和受控写作，不允许删除、移动或执行任意命令。</p></div><Button variant="outline" onClick={refreshBridge}>检查连接</Button></section>
           </TabsContent>
 
           <TabsContent value="vault">
@@ -584,14 +576,14 @@ export function KnowledgeWorkbench() {
 
           <TabsContent value="clippings">
             <div className="plain-library-head">
-              <div><strong>{clippings.generatedAt ? clippings.total : 90}</strong><span>篇 Clippings 内容</span><small>原文件保持在原目录，工作台只读展示</small></div>
+              <div><strong>{clippings.generatedAt ? clippings.total : 0}</strong><span>篇 Clippings 内容</span><small>原文件保持在原目录，工作台只读展示</small></div>
               <form onSubmit={(event) => { event.preventDefault(); void refreshKnowledgeViews(clipQuery); }}><Input value={clipQuery} onChange={(event) => setClipQuery(event.target.value)} aria-label="检索 Clippings" placeholder="检索标题、正文或路径" /><Button type="submit" variant="outline" disabled={knowledgeLoading}><Search />检索</Button></form>
             </div>
             <div className="plain-clippings-list">{clippings.items.length ? clippings.items.map((item) => <article key={item.path}><div><Badge variant="outline">{item.section === 'raw' ? '原始资料' : '结构化知识'}</Badge><span>{item.links} 条链接</span><time>{shortTime(item.updated)}</time></div><h2>{item.title}</h2><p>{item.preview || '暂无可显示的摘要'}</p><footer><small>{item.path}</small><a href={obsidianUrl(item.path)}>在 Obsidian 打开<ExternalLink /></a></footer></article>) : <div className="plain-empty"><Library />连接本地桥接后显示 Clippings 内容</div>}</div>
           </TabsContent>
 
           <TabsContent value="graph">
-            <div className="plain-graph-summary"><div><strong>{graph.generatedAt ? graph.totalNodes : 90}</strong><span>图谱节点</span></div><div><strong>{graph.edges.length}</strong><span>显式关系</span></div><div><strong>{graph.orphanCount}</strong><span>孤立节点</span></div><Button variant="outline" onClick={() => void refreshKnowledgeViews()} disabled={knowledgeLoading}><RefreshCw className={knowledgeLoading ? 'spin' : ''} />刷新图谱</Button></div>
+            <div className="plain-graph-summary"><div><strong>{graph.generatedAt ? graph.totalNodes : 0}</strong><span>图谱节点</span></div><div><strong>{graph.edges.length}</strong><span>显式关系</span></div><div><strong>{graph.orphanCount}</strong><span>孤立节点</span></div><Button variant="outline" onClick={() => void refreshKnowledgeViews()} disabled={knowledgeLoading}><RefreshCw className={knowledgeLoading ? 'spin' : ''} />刷新图谱</Button></div>
             <RelationGraph data={graph} selected={selectedNode} onSelect={setSelectedNode} />
           </TabsContent>
 
@@ -604,6 +596,10 @@ export function KnowledgeWorkbench() {
               <section className="plain-block"><SectionTitle title="长期未更新" note={`${snapshot.issues.stale.length} 篇`} /><div className="plain-review-list">{snapshot.issues.stale.length ? snapshot.issues.stale.map((path) => <a href={obsidianUrl(path)} key={path}><History /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有长期未更新笔记</div>}</div></section>
               <section className="plain-block"><SectionTitle title="孤立笔记" note={`${snapshot.issues.orphans.length} 篇`} /><div className="plain-review-list">{snapshot.issues.orphans.length ? snapshot.issues.orphans.map((path) => <a href={obsidianUrl(path)} key={path}><Network /><span><strong>{path.replace(/\.md$/, '').split('/').pop()}</strong><small>{path}</small></span><ExternalLink /></a>) : <div className="plain-empty compact"><Check />没有孤立笔记</div>}</div></section>
             </div>
+          </TabsContent>
+
+          <TabsContent value="blog">
+            <BlogWorkbench bridge={BRIDGE} bridgeOnline={bridgeOnline} onBridgeState={setBridgeOnline} onNotice={setNotice} />
           </TabsContent>
 
           <TabsContent value="pulse">
