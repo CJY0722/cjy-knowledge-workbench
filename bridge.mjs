@@ -573,29 +573,33 @@ function templateBody(title, sourcePath, sourceContent, instruction) {
   return `# ${title}\n\n> 写作要求：${instruction || '面向学生读者，保留来源，不虚构结果。'}\n\n## 先说结论\n\n待补充：用 2～3 句话说明这篇文章解决什么问题。\n\n## 背景与目标\n\n本文基于 [[${sourcePath.replace(/\.md$/i, '')}]] 整理。请在发布前核对原始资料。\n\n## 来源笔记要点\n\n${excerpt || '待补充：来源笔记暂无正文。'}\n\n## 实践步骤\n\n- 待补充：环境与前置条件\n- 待补充：核心操作\n- 待补充：验证方法\n\n## 常见问题\n\n待补充：只记录真实遇到或来源明确的问题。\n\n## 总结\n\n待补充：回顾结论，并给出可执行的下一步。`;
 }
 
-async function generateWithOpenAI(sourcePath, sourceContent, instruction, writingContext = '', revise = false) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key || key === 'YOUR_API_KEY_HERE') throw apiError('尚未配置 OPENAI_API_KEY', 'openai_not_configured');
-  const response = await fetch('https://api.openai.com/v1/responses', {
+async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_KEY) {
+  if (!key || key === 'YOUR_API_KEY_HERE') throw apiError('尚未配置 DeepSeek API Key', 'deepseek_not_configured');
+  const response = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || 'gpt-5-mini',
-      store: false,
-      instructions: revise
-        ? '你是严谨的中文技术编辑。保留用户原文的结构、文风与事实含义，只按要求修改；资料不足处标记“待确认”。不得虚构运行结果、踩坑、数据或经验。输出完整 Markdown，不要输出 YAML frontmatter。'
-        : '你是严谨的 CSDN 技术写作助手。只依据给定知识源写中文 Markdown；资料不足处标记“待确认”。不得虚构代码运行结果、踩坑经历、数据或个人经验。解释关键代码并保留来源 WikiLink。不要输出 YAML frontmatter。',
-      input: `写作要求：${instruction}\n来源路径：${sourcePath}\n\n知识源：\n${sourceContent.slice(0, 30000)}\n\n已检索的协作偏好与博客索引：\n${writingContext.slice(0, 10000)}`
+      model: process.env.DEEPSEEK_MODEL || 'deepseek-flash',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      stream: false,
     })
   });
   const data = await response.json();
-  if (!response.ok) throw apiError(data?.error?.message || 'OpenAI 生成失败', 'openai_failed');
-  const text = data.output_text || data.output?.flatMap(item => item.content || []).find(item => item.type === 'output_text')?.text;
-  if (!text) throw apiError('OpenAI 未返回正文', 'empty_generation');
-  return withoutFrontmatter(text);
+  if (!response.ok) throw apiError(data?.error?.message || 'DeepSeek 生成失败', 'deepseek_failed');
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw apiError('DeepSeek 未返回正文', 'empty_generation');
+  return text;
 }
 
-export async function generateDraft({ sourcePath, instruction = '', useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT) {
+async function generateWithDeepSeek(sourcePath, sourceContent, instruction, writingContext = '', revise = false, key = process.env.DEEPSEEK_API_KEY) {
+  const system = revise
+    ? '你是严谨的中文技术编辑。保留用户原文的结构、文风与事实含义，只按要求修改；资料不足处标记“待确认”。不得虚构运行结果、踩坑、数据或经验。输出完整 Markdown，不要输出 YAML frontmatter。'
+    : '你是严谨的 CSDN 技术写作助手。只依据给定知识源写中文 Markdown；资料不足处标记“待确认”。不得虚构代码运行结果、踩坑经历、数据或个人经验。解释关键代码并保留来源 WikiLink。不要输出 YAML frontmatter。';
+  const user = `写作要求：${instruction}\n来源路径：${sourcePath}\n\n知识源：\n${sourceContent.slice(0, 30000)}\n\n已检索的协作偏好与博客索引：\n${writingContext.slice(0, 10000)}`;
+  return withoutFrontmatter(await deepseekCompletion(system, user, key));
+}
+
+export async function generateDraft({ sourcePath, instruction = '', useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   if (preflightConfirmed !== true) throw apiError('生成初稿前必须完成知识库预检', 'preflight_required');
   const source = ensureInside(root, sourcePath);
   if (path.extname(source).toLowerCase() !== '.md') throw apiError('知识源必须是 Markdown 文件', 'invalid_source');
@@ -604,17 +608,17 @@ export async function generateDraft({ sourcePath, instruction = '', useAi = fals
   const title = sourceTitle;
   const preflight = await writingPreflight({ topic: title }, root);
   const context = writingContext(preflight);
-  const body = useAi ? await generateWithOpenAI(sourcePath, sourceContent, instruction, context) : templateBody(title, sourcePath, sourceContent, instruction);
+  const body = useAi ? await generateWithDeepSeek(sourcePath, sourceContent, instruction, context, false, apiKey) : templateBody(title, sourcePath, sourceContent, instruction);
   return { title, content: `${frontmatter(title, sourcePath, useAi)}\n\n${body.trim()}\n`, source: { path: sourcePath, title: sourceTitle }, mode: useAi ? 'ai' : 'template' };
 }
 
-export async function reviseDraft({ title, content, instruction = '', useAi = true, preflightConfirmed = false }, root = DEFAULT_VAULT) {
+export async function reviseDraft({ title, content, instruction = '', useAi = true, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   if (preflightConfirmed !== true) throw apiError('修改初稿前必须完成知识库预检', 'preflight_required');
   const cleanTitle = String(title || '').trim() || titleFromMarkdown(String(content || ''), '未命名文章');
   if (!String(content || '').trim()) throw apiError('已有文章不能为空');
   const preflight = await writingPreflight({ topic: cleanTitle }, root);
   const context = writingContext(preflight);
-  const body = useAi ? await generateWithOpenAI('用户已有文章', withoutFrontmatter(String(content)), instruction, context, true) : withoutFrontmatter(String(content));
+  const body = useAi ? await generateWithDeepSeek('用户已有文章', withoutFrontmatter(String(content)), instruction, context, true, apiKey) : withoutFrontmatter(String(content));
   return { title: cleanTitle, content: `${frontmatter(cleanTitle, '', useAi)}\n\n${body.trim()}\n`, mode: useAi ? 'ai-revise' : 'unchanged' };
 }
 
@@ -785,24 +789,13 @@ async function noteConnections({ path: relativePath, limit = 6 }, root = DEFAULT
   return { note: normalized, outgoing, backlinks, related };
 }
 
-async function askVault({ question, limit = 8 }, root = DEFAULT_VAULT) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key || key === 'YOUR_API_KEY_HERE') throw apiError('尚未配置 OPENAI_API_KEY', 'openai_not_configured');
+async function askVault({ question, limit = 8 }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   const matches = await searchNotes(question, limit, root);
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || 'gpt-5-mini',
-      store: false,
-      instructions: '只依据提供的 Obsidian 检索结果回答。信息不足时明确说明，不得虚构。引用结论时标出对应笔记路径。',
-      input: `问题：${String(question || '')}\n\n检索结果：\n${matches.map(item => `[${item.path}]\n${item.text}`).join('\n\n')}`,
-    }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw apiError(data?.error?.message || 'OpenAI 问答失败', 'openai_failed');
-  const answer = data.output_text || data.output?.flatMap(item => item.content || []).find(item => item.type === 'output_text')?.text;
-  if (!answer) throw apiError('OpenAI 未返回答案', 'empty_generation');
+  const answer = await deepseekCompletion(
+    '只依据提供的 Obsidian 检索结果回答。信息不足时明确说明，不得虚构。引用结论时标出对应笔记路径。',
+    `问题：${String(question || '')}\n\n检索结果：\n${matches.map(item => `[${item.path}]\n${item.text}`).join('\n\n')}`,
+    apiKey,
+  );
   return { answer };
 }
 
@@ -866,11 +859,11 @@ async function snapshot(root = DEFAULT_VAULT) {
   };
 }
 
-async function route(action, data, root) {
+async function route(action, data, root, apiKey) {
   if (action === 'search') return searchNotes(data.query, data.limit, root);
   if (action === 'writing_preflight') return writingPreflight(data, root);
-  if (action === 'generate_csdn') return generateDraft(data, root);
-  if (action === 'revise_csdn') return reviseDraft(data, root);
+  if (action === 'generate_csdn') return generateDraft(data, root, apiKey);
+  if (action === 'revise_csdn') return reviseDraft(data, root, apiKey);
   if (action === 'review_csdn') return reviewCsdnDraft(data);
   if (action === 'save_csdn') return saveDraft(data, root);
   if (action === 'prepare_csdn') return prepareCsdnPayload(data);
@@ -884,7 +877,7 @@ async function route(action, data, root) {
   if (action === 'clippings') return clippingsView(data, root);
   if (action === 'graph') return graphView(data, root);
   if (action === 'connections') return noteConnections(data, root);
-  if (action === 'ask') return askVault(data, root);
+  if (action === 'ask') return askVault(data, root, apiKey);
   if (action === 'index') { const state = await snapshot(root); return { mode: 'scan', changed_files: 0, written_chunks: 0, total_chunks: 0, total_notes: state.notes }; }
   if (action === 'brief') {
     const state = await snapshot(root);
@@ -895,7 +888,7 @@ async function route(action, data, root) {
   throw apiError('未知动作', 'unknown_action');
 }
 
-export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(process.env.WORKBENCH_PORT || DEFAULT_PORT), allowedOrigins = [], token = process.env.WORKBENCH_TOKEN || '' } = {}) {
+export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(process.env.WORKBENCH_PORT || DEFAULT_PORT), allowedOrigins = [], token = process.env.WORKBENCH_TOKEN || '', deepseekApiKey = process.env.DEEPSEEK_API_KEY || '' } = {}) {
   if (!root) throw apiError('未配置 Obsidian Vault，请使用 --vault 指定路径', 'vault_required');
   const vault = path.resolve(root);
   const origins = new Set(DEFAULT_ORIGINS);
@@ -903,6 +896,7 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
   for (const origin of configuredOrigins) origins.add(normalizeOrigin(origin));
   const tokens = new Set(token ? [token] : []);
   const pairingNonces = new Map();
+  let deepseekKey = deepseekApiKey;
   const server = http.createServer(async (request, response) => {
     const origin = request.headers.origin;
     const allowed = !origin || origins.has(origin);
@@ -948,12 +942,22 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
       const suppliedToken = request.headers['x-workbench-token'];
       if (![...tokens].some(value => safeTokenEqual(suppliedToken, value))) return send(401, { error: '请先在工作台设置中完成本地配对', code: 'pairing_required' });
       const status = await vaultStatus(vault);
-      if (request.method === 'GET' && requestUrl.pathname === '/health') return send(200, { connected: true, vault_name: path.basename(vault), ...status, openai_configured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY_HERE') });
+      if (request.method === 'GET' && requestUrl.pathname === '/health') return send(200, { connected: true, vault_name: path.basename(vault), ...status, deepseek_configured: Boolean(deepseekKey && deepseekKey !== 'YOUR_API_KEY_HERE') });
       if (!status.vault_exists || !status.obsidian_configured) return send(400, { error: '指定目录不是可用的 Obsidian Vault', code: 'invalid_vault' });
       if (request.method === 'GET' && requestUrl.pathname === '/snapshot') return send(200, await snapshot(vault));
       if (request.method !== 'POST' || requestUrl.pathname !== '/action') return send(404, { error: '未找到接口', code: 'not_found' });
       const data = JSON.parse(await readRequestBody(request) || '{}');
-      send(200, { ok: true, result: await route(data.action, data, vault) });
+      if (data.action === 'configure_deepseek') {
+        const key = String(data.apiKey || '').trim();
+        if (!/^sk-[A-Za-z0-9_-]{16,}$/.test(key)) throw apiError('DeepSeek API Key 格式不正确', 'invalid_deepseek_key');
+        deepseekKey = key;
+        return send(200, { ok: true, result: { configured: true } });
+      }
+      if (data.action === 'clear_deepseek') {
+        deepseekKey = '';
+        return send(200, { ok: true, result: { configured: false } });
+      }
+      send(200, { ok: true, result: await route(data.action, data, vault, deepseekKey) });
     } catch (error) { send(error.code === 'ENOENT' ? 404 : 400, { error: error.message, code: error.code || 'bad_request' }); }
   });
   return { server, port, vault };

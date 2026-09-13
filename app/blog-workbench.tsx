@@ -96,17 +96,19 @@ export function BlogWorkbench({
   bridge,
   bridgeToken,
   bridgeOnline,
-  openAiConfigured,
+  deepseekConfigured,
   onBridgeState,
   onConnect,
+  onConfigure,
   onNotice,
 }: {
   bridge: string;
   bridgeToken: string;
   bridgeOnline: boolean;
-  openAiConfigured: boolean;
+  deepseekConfigured: boolean;
   onBridgeState: (online: boolean) => void;
   onConnect: () => void;
+  onConfigure: () => void;
   onNotice: (message: string) => void;
 }) {
   const [mode, setMode] = useState<WritingMode>('manual');
@@ -288,7 +290,7 @@ export function BlogWorkbench({
   const generateDraft = async (useAi: boolean) => {
     const issue = generationIssue();
     if (issue) return onNotice(issue);
-    if (useAi && !openAiConfigured) return onNotice('本地桥接尚未配置 OpenAI。请按使用指南配置后重启桥接。');
+    if (useAi && !deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
     setAiConsentOpen(false);
     setBusy(useAi ? 'generate' : 'template');
     try {
@@ -427,9 +429,9 @@ export function BlogWorkbench({
     </section>
 
     <section className="plain-block blog-readiness">
-      <div><ShieldCheck /><span><strong>开始前检查</strong><small>{!bridgeOnline ? '先连接本地知识库，预检、生成、保存和发布物料才可使用。' : !openAiConfigured ? '知识库已连接；普通写作可用，AI 生成还需配置 OpenAI。' : '知识库与 AI 均已就绪。请先选择材料，再确认重点并执行预检。'}</small></span></div>
-      <div className="blog-readiness-status"><span data-ready={bridgeOnline}>Obsidian {bridgeOnline ? '已连接' : '未连接'}</span><span data-ready={openAiConfigured}>OpenAI {openAiConfigured ? '已配置' : '未配置'}</span></div>
-      <div className="blog-inline-actions">{!bridgeOnline && <Button onClick={onConnect}><ShieldCheck />连接 Obsidian</Button>}<a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">查看使用指南</a></div>
+      <div><ShieldCheck /><span><strong>开始前检查</strong><small>{!bridgeOnline ? '先连接本地知识库，预检、生成、保存和发布物料才可使用。' : !deepseekConfigured ? '知识库已连接；普通写作可用，AI 生成还需在设置中填写 DeepSeek API Key。' : '知识库与 DeepSeek 均已就绪。请先选择材料，再确认重点并执行预检。'}</small></span></div>
+      <div className="blog-readiness-status"><span data-ready={bridgeOnline}>Obsidian {bridgeOnline ? '已连接' : '未连接'}</span><span data-ready={deepseekConfigured}>DeepSeek {deepseekConfigured ? '已配置' : '未配置'}</span></div>
+      <div className="blog-inline-actions">{!bridgeOnline && <Button onClick={onConnect}><ShieldCheck />连接 Obsidian</Button>}{bridgeOnline && !deepseekConfigured && <Button onClick={onConfigure}><Sparkles />配置 DeepSeek</Button>}<a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">查看使用指南</a></div>
     </section>
 
     <div className="blog-config-grid">
@@ -478,7 +480,7 @@ export function BlogWorkbench({
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 OpenAI 生成</DialogTitle><DialogDescription>{mode === 'ai' ? '将把所选知识源、写作要求和预检摘要发送给 OpenAI。' : '将把当前文章、修改要求和预检摘要发送给 OpenAI。'}不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={openAiConfigured}><strong>{openAiConfigured ? 'OpenAI 已配置，可以生成' : 'OpenAI 尚未配置'}</strong><span>{openAiConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请按照使用指南设置 OPENAI_API_KEY，然后重启本地桥接。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{openAiConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">打开配置指南</a>}</DialogFooter></DialogContent></Dialog>
+    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}本机桥接会使用你的 API Key 鉴权，但不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
 
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料中心</DialogTitle><DialogDescription>Obsidian 特有语法已在出站时转换；图片、代码和排版仍需在各平台发布前人工核对。工作台不会读取平台账号或替你点击发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button onClick={async () => { await copyText(item.content); const opened = window.open(item.editorUrl, '_blank'); if (opened) opened.opener = null; onNotice(`${platform.name} 正文已复制，请在官方编辑器检查后发布。`); }}><ExternalLink />复制正文并打开</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div>}</article>; })}</div></DialogContent></Dialog>
 

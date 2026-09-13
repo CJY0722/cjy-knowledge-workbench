@@ -63,7 +63,19 @@ test('protects a personal vault behind origin checks and pairing', async () => {
     assert.equal(health.vault_name, path.basename(root));
     assert.equal(health.vault_exists, true);
     assert.equal(health.obsidian_configured, true);
+    assert.equal(health.deepseek_configured, false);
     assert.equal('vault' in health, false);
+
+    const actionHeaders = { Origin: 'https://example.github.io', 'X-Workbench-Token': pairedToken, 'Content-Type': 'application/json' };
+    const configuredResponse = await fetch(`${url}/action`, { method: 'POST', headers: actionHeaders, body: JSON.stringify({ action: 'configure_deepseek', apiKey: 'sk-test-key-for-bridge-only' }) });
+    const configured = await configuredResponse.json();
+    assert.equal(configured.result.configured, true);
+    assert.doesNotMatch(JSON.stringify(configured), /sk-test-key/);
+    const configuredHealth = await fetch(`${url}/health`, { headers: actionHeaders }).then(response => response.json());
+    assert.equal(configuredHealth.deepseek_configured, true);
+    await fetch(`${url}/action`, { method: 'POST', headers: actionHeaders, body: JSON.stringify({ action: 'clear_deepseek' }) });
+    const clearedHealth = await fetch(`${url}/health`, { headers: actionHeaders }).then(response => response.json());
+    assert.equal(clearedHealth.deepseek_configured, false);
 
     const forbiddenPairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://evil.example')}`);
     assert.equal(forbiddenPairing.status, 403);

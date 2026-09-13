@@ -32,7 +32,7 @@ npm install
 npm run bridge -- --vault "D:\Notes\MyVault"
 ```
 
-3. 打开 <https://cjy0722.github.io/cjy-knowledge-workbench/>，进入“设置”，点击“连接自己的 Obsidian”。
+3. 打开 <https://cjy0722.github.io/cjy-knowledge-workbench/>，进入“设置”，点击“连接自己的 Obsidian”。需要 AI 功能时，在设置中填写自己的 DeepSeek API Key；密钥只保存在本机桥接进程内存中。
 4. 在打开的本机授权页核对网页来源和 Vault 名称，再点击“允许连接”，随后会自动返回工作台。如果浏览器询问本地网络访问权限，请允许当前网页访问本机桥接。
 
 授权只在当前浏览器标签页会话内有效。关闭桥接或标签页后，再次使用时需要重新授权。
@@ -59,7 +59,7 @@ npm run bridge -- --vault "D:\Notes\MyVault" --origin "https://USERNAME.github.i
 
 1. 选择“自己创作”“AI 从知识源写”或“修改已有文章”；也可以直接导入本地 Markdown。
 2. 输入标题和正文，或选择参考笔记，再完成五类知识预检。
-3. 确认重点后继续创作、生成或修改草稿；发送内容给 OpenAI 前会再次确认。
+3. 确认重点后继续创作、生成或修改草稿；发送内容给 DeepSeek 前会再次确认。
 4. 运行结构、图示宽度、长文与去 AI 痕迹检查。
 5. 明确确认后保存 Markdown，再一次生成五个平台物料：CSDN / 掘金使用标准 Markdown，知乎 / 微信公众号使用富文本兼容稿，小红书同时生成纯文本长文和可下载的 3:4 PNG 图卡。
 6. 预览并确认复盘条目后，才会回写 Obsidian 元知识与写作事件日志。
@@ -73,6 +73,7 @@ npm run bridge -- --vault "D:\Notes\MyVault" --origin "https://USERNAME.github.i
 - 本地图片只会保留引用或图卡占位，不会自动上传；代码块、表格、图片和最终排版必须在目标平台人工核对。
 - PDF、图片等视觉材料需要先由用户完成渲染或 OCR，在界面中填写核验记录并明确确认后才能继续。
 - 浏览器只保存当前会话草稿；长期知识只写入每位用户自己选择的 Obsidian Vault。
+- 每位使用者填写自己的 DeepSeek API Key；密钥只发送到已配对的本机桥接并保存在进程内存中，不进入 GitHub、Obsidian 或浏览器长期存储。
 - 桥接只监听 `127.0.0.1`，并同时校验精确网页来源和本机配对令牌；令牌只保存在当前标签页的 `sessionStorage`。
 - 桥接不会向网页返回 Vault 的完整本机路径，也不会把知识内容上传到 GitHub Pages。
 - Fork 用户必须用 `--origin` 明确允许自己的网页来源，不接受任意 `*.github.io` 页面。

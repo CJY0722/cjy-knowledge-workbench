@@ -65,7 +65,7 @@ type WorkbenchSettings = {
   density: 'comfortable' | 'compact';
   autoRefresh: boolean;
 };
-type BridgeHealth = { vault_name?: string; vault_exists?: boolean; obsidian_configured?: boolean; openai_configured?: boolean; error?: string };
+type BridgeHealth = { vault_name?: string; vault_exists?: boolean; obsidian_configured?: boolean; deepseek_configured?: boolean; error?: string };
 
 const BRIDGE = 'http://127.0.0.1:8766';
 const BRIDGE_TOKEN_KEY = 'workbench-bridge-token';
@@ -182,7 +182,8 @@ export function KnowledgeWorkbench() {
   const [snapshot, setSnapshot] = useState(fallbackSnapshot);
   const [pulse, setPulse] = useState(fallbackPulse);
   const [bridgeOnline, setBridgeOnline] = useState(false);
-  const [aiConfigured, setAiConfigured] = useState(false);
+  const [deepseekConfigured, setDeepseekConfigured] = useState(false);
+  const [deepseekKey, setDeepseekKey] = useState('');
   const [bridgeToken, setBridgeToken] = useState('');
   const [vaultName, setVaultName] = useState('');
   const [connectionError, setConnectionError] = useState('尚未与本地桥接配对');
@@ -216,7 +217,7 @@ export function KnowledgeWorkbench() {
   const refreshBridge = async (token = bridgeToken) => {
     if (!token) {
       setBridgeOnline(false);
-      setAiConfigured(false);
+      setDeepseekConfigured(false);
       setConnectionError('尚未与本地桥接配对');
       return;
     }
@@ -234,11 +235,11 @@ export function KnowledgeWorkbench() {
       setSnapshot(await response.json());
       setVaultName(health.vault_name || 'Obsidian');
       setBridgeOnline(true);
-      setAiConfigured(Boolean(health.openai_configured));
+      setDeepseekConfigured(Boolean(health.deepseek_configured));
       setConnectionError('');
     } catch (error) {
       setBridgeOnline(false);
-      setAiConfigured(false);
+      setDeepseekConfigured(false);
       setConnectionError(error instanceof Error ? error.message : '连接失败');
     } finally {
       setSyncing(false);
@@ -386,7 +387,8 @@ export function KnowledgeWorkbench() {
     sessionStorage.removeItem(BRIDGE_TOKEN_KEY);
     setBridgeToken('');
     setBridgeOnline(false);
-    setAiConfigured(false);
+    setDeepseekConfigured(false);
+    setDeepseekKey('');
     setVaultName('');
     setConnectionError('已断开本地知识库');
     setSnapshot(fallbackSnapshot);
@@ -436,6 +438,29 @@ export function KnowledgeWorkbench() {
     }
     if (!response.ok || data.error) throw new Error(data.error || '操作失败');
     return data.result;
+  };
+
+  const configureDeepseek = async () => {
+    if (!deepseekKey.trim()) return setNotice('请输入自己的 DeepSeek API Key。');
+    setActionBusy(true);
+    try {
+      await bridgeAction({ action: 'configure_deepseek', apiKey: deepseekKey.trim() });
+      setDeepseekKey('');
+      setDeepseekConfigured(true);
+      setNotice('DeepSeek API Key 已保存到本机桥接内存，关闭桥接后会自动清除。');
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'DeepSeek 配置失败'); }
+    finally { setActionBusy(false); }
+  };
+
+  const clearDeepseek = async () => {
+    setActionBusy(true);
+    try {
+      await bridgeAction({ action: 'clear_deepseek' });
+      setDeepseekKey('');
+      setDeepseekConfigured(false);
+      setNotice('本机桥接中的 DeepSeek API Key 已清除。');
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'DeepSeek 配置清除失败'); }
+    finally { setActionBusy(false); }
   };
 
   const runIndex = async () => {
@@ -672,7 +697,7 @@ export function KnowledgeWorkbench() {
           </TabsContent>
 
           <TabsContent value="blog">
-            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} openAiConfigured={aiConfigured} onBridgeState={setBridgeOnline} onConnect={connectVault} onNotice={setNotice} />
+            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} deepseekConfigured={deepseekConfigured} onBridgeState={setBridgeOnline} onConnect={connectVault} onConfigure={() => setSettingsOpen(true)} onNotice={setNotice} />
           </TabsContent>
 
           <TabsContent value="pulse">
@@ -689,7 +714,7 @@ export function KnowledgeWorkbench() {
         <DialogContent className="plain-dialog plain-settings-dialog">
           <DialogHeader>
             <DialogTitle>工作台设置</DialogTitle>
-            <DialogDescription>偏好保存在当前浏览器，不会写入或修改 Obsidian 笔记。</DialogDescription>
+            <DialogDescription>界面偏好保存在当前浏览器；DeepSeek 密钥仅保存在本机桥接内存，不写入浏览器、Obsidian 或 GitHub。</DialogDescription>
           </DialogHeader>
           <div className="plain-settings-sections">
             <section>
@@ -730,6 +755,10 @@ export function KnowledgeWorkbench() {
               <div className="plain-setting-row">
                 <span><strong>{bridgeOnline ? vaultName : 'Obsidian 桥接'}</strong><small>{bridgeOnline ? '已授权当前页面读取这个 Vault' : connectionError}</small></span>
                 <div className="plain-setting-action"><Badge variant="outline" className={bridgeOnline ? 'plain-live' : 'plain-snapshot'}>{bridgeOnline ? '已连接' : '未连接'}</Badge><Button size="sm" onClick={connectVault}>连接自己的 Obsidian</Button>{bridgeToken && <Button variant="outline" size="sm" onClick={() => { void refreshBridge(); void refreshKnowledgeViews(); }} disabled={syncing || knowledgeLoading}><RefreshCw className={syncing || knowledgeLoading ? 'spin' : ''} />重试</Button>}{bridgeToken && <Button variant="outline" size="sm" onClick={disconnectVault}>断开</Button>}</div>
+              </div>
+              <div className="plain-setting-row">
+                <span><strong>DeepSeek API Key</strong><small>{deepseekConfigured ? '已配置；每位使用者只连接自己的密钥' : '仅传给当前电脑的本机桥接，关闭桥接后自动清除'}</small></span>
+                <div className="plain-setting-action plain-api-key-action"><Input type="password" value={deepseekKey} onChange={(event) => setDeepseekKey(event.target.value)} autoComplete="off" aria-label="DeepSeek API Key" placeholder="sk-..." />{deepseekConfigured ? <Button variant="outline" size="sm" onClick={() => void clearDeepseek()} disabled={actionBusy}>清除</Button> : <Button size="sm" onClick={() => void configureDeepseek()} disabled={!bridgeOnline || actionBusy}>保存到本机</Button>}</div>
               </div>
               <div className="plain-setting-row plain-setting-help">
                 <span><strong>首次使用</strong><small>下载项目后运行：npm run bridge -- --vault “你的 Vault 路径”，再点击上方连接按钮。</small></span>
