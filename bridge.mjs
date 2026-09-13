@@ -622,6 +622,21 @@ export async function reviseDraft({ title, content, instruction = '', useAi = tr
   return { title: cleanTitle, content: `${frontmatter(cleanTitle, '', useAi)}\n\n${body.trim()}\n`, mode: useAi ? 'ai-revise' : 'unchanged' };
 }
 
+export async function improveDraft({ title, content, kind, issues = [] }, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
+  const source = String(content || '').replace(/\r\n?/g, '\n').trim();
+  if (!source) throw apiError('正文不能为空', 'empty_draft');
+  if (!['fix', 'humanize'].includes(kind)) throw apiError('未知的草稿改写方式', 'invalid_improvement');
+  const metadata = source.match(/^---\s*\n[\s\S]*?\n---/)?.[0] || '';
+  const body = withoutFrontmatter(source);
+  const system = kind === 'fix'
+    ? '你是严谨的中文技术编辑。只修正列出的审核问题，保留原文事实、结构意图、代码、链接和技术术语。不得虚构运行结果、数据、来源或个人经历。遇到资料不足的占位内容，应删除无法支持的主张或改成明确的资料边界，不得编造答案。ASCII 图示每行不超过 60 个半角显示列。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。'
+    : '你是克制的中文技术编辑。让文章像真实作者写作：删除套话、机械过渡、重复总结和夸张措辞，调整长短句与段落节奏；保留全部事实、代码、链接、标题层级、技术术语和作者观点，不新增经验、结论或数据。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。';
+  const problemList = Array.isArray(issues) && issues.length ? issues.map(item => `- ${String(item)}`).join('\n') : '- 无指定问题，按任务目标检查全文';
+  const rewritten = withoutFrontmatter(await complete(system, `文章标题：${String(title || '')}\n\n需要处理的问题：\n${problemList}\n\n当前 Markdown：\n${body.slice(0, 30000)}`, apiKey));
+  const improved = `${metadata ? `${metadata}\n\n` : ''}${rewritten.trim()}\n`;
+  return { content: improved, review: reviewCsdnDraft({ title, content: improved }), kind };
+}
+
 export async function saveDraft({
   title, content, sourcePath = '', expectedUpdated = '', overwriteConfirmed = false, approved = false,
   preflightConfirmed = false, focusDecision = 'pending', materialKind = 'markdown', visualVerified = false,
@@ -864,6 +879,7 @@ async function route(action, data, root, apiKey) {
   if (action === 'writing_preflight') return writingPreflight(data, root);
   if (action === 'generate_csdn') return generateDraft(data, root, apiKey);
   if (action === 'revise_csdn') return reviseDraft(data, root, apiKey);
+  if (action === 'improve_csdn') return improveDraft(data, apiKey);
   if (action === 'review_csdn') return reviewCsdnDraft(data);
   if (action === 'save_csdn') return saveDraft(data, root);
   if (action === 'prepare_csdn') return prepareCsdnPayload(data);

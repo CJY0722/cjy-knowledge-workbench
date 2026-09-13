@@ -201,6 +201,7 @@ export function BlogWorkbench({
 
   const invalidateOutcome = () => {
     setReview(null);
+    setHumanizer('pending');
     setFinalized(false);
     setPublishPack(null);
     setPreparedPlatforms({});
@@ -321,6 +322,31 @@ export function BlogWorkbench({
       setReview(result);
       onNotice(result.blockers.length ? `审核发现 ${result.blockers.length} 个阻塞项。` : '草稿审核完成，可以进入写入确认。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '审核失败'); }
+    finally { setBusy(''); }
+  };
+
+  const improveDraft = async (kind: 'fix' | 'humanize') => {
+    if (!bridgeOnline) return onNotice('请先连接本地 Obsidian。');
+    if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
+    if (!title.trim() || !draft.trim()) return onNotice('标题和正文不能为空。');
+    if (!workflowReady) return onNotice('请先完成知识库预检、重点确认和材料核验。');
+    if (kind === 'fix' && !review) return onNotice('请先点击“审核检查”。');
+    if (kind === 'fix' && !review?.blockers.length) return onNotice('当前没有需要修正的阻塞项。');
+    setBusy(kind);
+    try {
+      const result = await request<{ content: string; review: ReviewResult }>('improve_csdn', {
+        title,
+        content: draft,
+        kind,
+        issues: kind === 'fix' ? review?.blockers || [] : review?.warnings || [],
+      });
+      setDraft(result.content);
+      invalidateOutcome();
+      setReview(result.review);
+      onNotice(kind === 'fix'
+        ? `阻塞修正完成，复检后剩余 ${result.review.blockers.length} 个阻塞项。`
+        : 'DeepSeek 去 AI 味完成，请复核全文并确认人工表达检查。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : '草稿改写失败'); }
     finally { setBusy(''); }
   };
 
@@ -471,7 +497,21 @@ export function BlogWorkbench({
     </section>
 
     <div className="blog-finish-grid">
-      <section className="plain-block blog-finish-card"><div className="blog-card-title"><FileCheck2 /><div><strong>审核与定稿</strong><span>修改正文会自动撤销审核和定稿状态</span></div></div>{review ? <div className="blog-review-result"><strong>{review.blockers.length ? `${review.blockers.length} 个阻塞项` : '没有阻塞项'}</strong><span>{review.warnings.length} 条提醒 · {review.diagramLines.length} 行图示超宽 · {review.longArticle ? '长文将分段写入' : '普通整稿写入'}</span>{[...review.blockers, ...review.warnings].map((item) => <small key={item}>△ {item}</small>)}</div> : <div className="blog-pending"><TriangleAlert />尚未审核</div>}<label htmlFor="blog-humanizer">去 AI 味<select id="blog-humanizer" value={humanizer} onChange={(event) => { setHumanizer(event.target.value as HumanizerStatus); setFinalized(false); setPublishPack(null); }}><option value="pending">未执行</option><option value="checked">已完成人工表达检查</option><option value="skipped">明确跳过</option></select></label><Button onClick={finalize} disabled={Boolean(busy)}><LockKeyhole />确认文章定稿</Button></section>
+      <section className="plain-block blog-finish-card">
+        <div className="blog-card-title"><FileCheck2 /><div><strong>审核与定稿</strong><span>修改正文会自动撤销审核和定稿状态</span></div></div>
+        {review ? <div className="blog-review-result">
+          <strong>{review.blockers.length ? `${review.blockers.length} 个阻塞项` : '没有阻塞项'}</strong>
+          <span>{review.warnings.length} 条提醒 · {review.diagramLines.length} 行图示超宽 · {review.longArticle ? '长文将分段写入' : '普通整稿写入'}</span>
+          {[...review.blockers, ...review.warnings].map((item) => <small key={item}>△ {item}</small>)}
+          {review.blockers.length > 0 && <Button variant="outline" onClick={() => void improveDraft('fix')} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}修正阻塞项</Button>}
+        </div> : <div className="blog-pending"><TriangleAlert />尚未审核</div>}
+        <div className="blog-humanizer-actions">
+          <Button variant="outline" onClick={() => void improveDraft('humanize')} disabled={Boolean(busy)}>{busy === 'humanize' ? <Loader2 className="spin" /> : <Sparkles />}DeepSeek 去 AI 味</Button>
+          <label htmlFor="blog-humanizer">人工确认<select id="blog-humanizer" value={humanizer} onChange={(event) => { setHumanizer(event.target.value as HumanizerStatus); setFinalized(false); setPublishPack(null); }}><option value="pending">等待人工复核</option><option value="checked">已完成人工表达检查</option><option value="skipped">明确跳过</option></select></label>
+          <small>AI 改写不会自动通过人工检查；请复核事实、代码和表达后再确认。</small>
+        </div>
+        <Button onClick={finalize} disabled={Boolean(busy)}><LockKeyhole />确认文章定稿</Button>
+      </section>
 
       <section className="plain-block blog-finish-card"><div className="blog-card-title"><Send /><div><strong>多平台同步</strong><span>按平台规范生成 Markdown、富文本、纯文本和图卡</span></div></div><div className="blog-inline-actions"><Button variant="outline" onClick={createPublishPack} disabled={Boolean(busy)}>生成推广文案</Button><Button onClick={preparePlatforms} disabled={Boolean(busy)}>生成五平台物料</Button></div>{publishPack ? <div className="blog-publish-pack"><label>CSDN 简介（{publishPack.csdnIntro.length}/256）<Textarea readOnly value={publishPack.csdnIntro} rows={3} /></label><label>小红书标题（{publishPack.xiaohongshuTitle.length}/20）<Input readOnly value={publishPack.xiaohongshuTitle} /></label><label>小红书介绍（{publishPack.xiaohongshuIntro.length}/100）<Textarea readOnly value={publishPack.xiaohongshuIntro} rows={3} /></label></div> : <div className="blog-pending"><Clipboard />定稿后生成五个平台的适配物料</div>}</section>
 

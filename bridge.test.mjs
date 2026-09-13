@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, markdownToPlatformText,
+  commitClosure, createBridge, createPublishPack, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
   obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, reviewCsdnDraft,
   sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
@@ -169,6 +169,32 @@ test('reviews diagrams and creates bounded publish copy', () => {
   assert.doesNotMatch(pack.csdnIntro, /写作要求/);
   assert.ok(pack.xiaohongshuTitle.length <= 20);
   assert.ok(pack.xiaohongshuIntro.length <= 100);
+});
+
+test('fixes blockers and humanizes a draft without losing frontmatter', async () => {
+  const original = `---\ntitle: "测试"\nsource: "[[来源]]"\n---\n\n# 测试\n\n## 开始\n\n首先，TODO`;
+  const fixed = await improveDraft(
+    { title: '测试', content: original, kind: 'fix', issues: ['正文结构少于两个二级章节', '正文仍包含待补充或待确认标记'] },
+    'test-key',
+    async (system, user) => {
+      assert.match(system, /只修正列出的审核问题/);
+      assert.match(user, /TODO/);
+      return '# 测试\n\n## 背景\n\n原文资料有限。\n\n## 结论\n\n保留来源。';
+    },
+  );
+  assert.match(fixed.content, /^---[\s\S]*source: "\[\[来源\]\]"/);
+  assert.equal(fixed.review.blockers.length, 0);
+
+  const humanized = await improveDraft(
+    { title: '测试', content: fixed.content, kind: 'humanize' },
+    'test-key',
+    async (system) => {
+      assert.match(system, /删除套话/);
+      return '# 测试\n\n## 背景\n\n自然表达。\n\n## 结论\n\n明确收尾。';
+    },
+  );
+  assert.match(humanized.content, /^---[\s\S]*source: "\[\[来源\]\]"/);
+  assert.equal(humanized.review.blockers.length, 0);
 });
 
 test('records preflight misses and writes approved closure with deduplication', async () => {
