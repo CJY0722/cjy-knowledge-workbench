@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
 import {
   BookCheck, Check, CheckCircle2, Clipboard, ExternalLink, FileCheck2, FilePenLine,
-  Library, Loader2, LockKeyhole, RefreshCw, Save, Search, Send, ShieldCheck,
-  Sparkles, TriangleAlert,
+  FilePlus2, Library, Loader2, LockKeyhole, RefreshCw, Save, Search, Send,
+  ShieldCheck, Sparkles, TriangleAlert, Upload,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -25,17 +25,39 @@ type ReviewResult = {
   characters: number;
 };
 type PublishPack = { csdnIntro: string; xiaohongshuTitle: string; xiaohongshuIntro: string };
-type PreparedCsdn = { title: string; content: string; characters: number; warnings: string[]; editorUrl: string };
+type PlatformId = 'csdn' | 'juejin' | 'zhihu' | 'wechat';
+type PreparedPlatform = { platform: PlatformId; platformName: string; title: string; content: string; characters: number; warnings: string[]; editorUrl: string; format: string };
 type ClosurePreview = { summary: string; entries: Array<{ category: string; value: string; target: string; duplicate: boolean }>; event: string };
-type WritingMode = 'ai' | 'revise';
+type WritingMode = 'manual' | 'ai' | 'revise';
 type HumanizerStatus = 'pending' | 'checked' | 'skipped';
 type MaterialKind = 'markdown' | 'visual';
 
 const SESSION_KEY = 'cjy-blog-session-v1';
+const PLATFORMS: Array<{ id: PlatformId; name: string }> = [
+  { id: 'csdn', name: 'CSDN' },
+  { id: 'juejin', name: '掘金' },
+  { id: 'zhihu', name: '知乎' },
+  { id: 'wechat', name: '微信公众号' },
+];
 
 async function copyText(value: string) {
-  if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不支持安全剪贴板，请手动复制');
-  await navigator.clipboard.writeText(value);
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  // oxlint-disable-next-line typescript/no-deprecated -- compatibility fallback for embedded browsers without Clipboard API access
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (copied) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch { /* handled below */ }
+  throw new Error('复制失败，请手动选择内容');
 }
 
 export function BlogWorkbench({
@@ -51,7 +73,7 @@ export function BlogWorkbench({
   onBridgeState: (online: boolean) => void;
   onNotice: (message: string) => void;
 }) {
-  const [mode, setMode] = useState<WritingMode>('ai');
+  const [mode, setMode] = useState<WritingMode>('manual');
   const [materialKind, setMaterialKind] = useState<MaterialKind>('markdown');
   const [visualVerified, setVisualVerified] = useState(false);
   const [visualEvidence, setVisualEvidence] = useState('');
@@ -72,7 +94,7 @@ export function BlogWorkbench({
   const [humanizer, setHumanizer] = useState<HumanizerStatus>('pending');
   const [finalized, setFinalized] = useState(false);
   const [publishPack, setPublishPack] = useState<PublishPack | null>(null);
-  const [prepared, setPrepared] = useState<PreparedCsdn | null>(null);
+  const [preparedPlatforms, setPreparedPlatforms] = useState<Partial<Record<PlatformId, PreparedPlatform>>>({});
   const [drafts, setDrafts] = useState<DraftNote[]>([]);
   const [busy, setBusy] = useState('');
   const [saveOpen, setSaveOpen] = useState(false);
@@ -111,7 +133,7 @@ export function BlogWorkbench({
       const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') as Partial<{ mode: WritingMode; materialKind: MaterialKind; visualEvidence: string; title: string; draft: string; focus: string; instruction: string; source: SourceNote }>;
       queueMicrotask(() => {
         if (!active) return;
-        if (saved.mode === 'ai' || saved.mode === 'revise') setMode(saved.mode);
+        if (saved.mode === 'manual' || saved.mode === 'ai' || saved.mode === 'revise') setMode(saved.mode);
         if (saved.materialKind === 'markdown' || saved.materialKind === 'visual') setMaterialKind(saved.materialKind);
         if (typeof saved.visualEvidence === 'string') setVisualEvidence(saved.visualEvidence);
         if (typeof saved.title === 'string') setTitle(saved.title);
@@ -134,7 +156,7 @@ export function BlogWorkbench({
   const statusText = ['准备知识与材料', '生成或修改初稿', '审核并写入 Markdown', '等待定稿确认', '发布与收尾'][stage - 1];
   const materialReady = materialKind === 'markdown' || Boolean(visualVerified && visualEvidence.trim());
   const workflowReady = Boolean(retrieval && focusDecision !== 'pending' && materialReady);
-  const canGenerate = workflowReady;
+  const canGenerate = workflowReady && mode !== 'manual';
   const canFinalize = Boolean(workflowReady && draftPath && !dirty && review && !review.blockers.length && humanizer !== 'pending');
   const preview = useMemo(() => draft.trim() || '正文预览会显示在这里。', [draft]);
 
@@ -142,13 +164,38 @@ export function BlogWorkbench({
     setReview(null);
     setFinalized(false);
     setPublishPack(null);
-    setPrepared(null);
+    setPreparedPlatforms({});
     setClosurePreview(null);
   };
 
   const changeDraft = (value: string) => {
     setDraft(value);
     invalidateOutcome();
+  };
+
+  const startManualDraft = () => {
+    if (draft.trim() && !window.confirm('新建原创文章会清空当前编辑区，是否继续？')) return;
+    setMode('manual'); setTitle(''); setDraft(''); setDraftPath(''); setDraftUpdated('');
+    setSavedDraft(''); setSavedTitle(''); setSource(null); setSources([]); setRetrieval(null);
+    setFocusDecision('pending'); setHumanizer('pending'); invalidateOutcome();
+    onNotice('已新建原创文章，可以直接输入标题和正文。');
+  };
+
+  const importMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (file.size > 200000) return onNotice('文章超过 20 万字符限制，请缩短后再导入。');
+    if (draft.trim() && !window.confirm('导入文章会替换当前编辑区，是否继续？')) return;
+    try {
+      const content = await file.text();
+      const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+      setMode('revise'); setTitle(heading || file.name.replace(/\.(md|markdown|txt)$/i, '')); setDraft(content);
+      setDraftPath(''); setDraftUpdated(''); setSavedDraft(''); setSavedTitle(''); setSource(null);
+      setSources([]); setRetrieval(null); setFocusDecision('pending'); setHumanizer('pending'); invalidateOutcome();
+      onNotice(`已导入 ${file.name}，修改后需要重新预检、审核和保存。`);
+    } catch { onNotice('文章读取失败，请确认文件可以访问。'); }
   };
 
   const selectSource = (item: SourceNote) => {
@@ -254,6 +301,7 @@ export function BlogWorkbench({
       const result = await request<{ title: string; content: string; path: string; updated: string; source?: SourceNote | null }>('read_csdn', { path });
       setTitle(result.title); setDraft(result.content); setDraftPath(result.path); setDraftUpdated(result.updated);
       setSavedDraft(result.content); setSavedTitle(result.title); setSource(result.source || null);
+      setMode('revise');
       setRetrieval(null); setFocusDecision('pending'); setMaterialKind('markdown'); setVisualVerified(false); setVisualEvidence('');
       invalidateOutcome(); setHumanizer('pending');
       onNotice('草稿已打开。修改后需要重新审核和确认。');
@@ -276,13 +324,15 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
-  const prepareCsdn = async () => {
+  const preparePlatforms = async () => {
     if (!finalized) return onNotice('请先明确确认文章已经定稿。');
     setBusy('prepare-publish');
     try {
-      setPrepared(await request<PreparedCsdn>('prepare_csdn', { title, content: draft }));
+      const results = await Promise.all(PLATFORMS.map(({ id }) => request<PreparedPlatform>('prepare_platform', { platform: id, title, content: draft })));
+      setPreparedPlatforms(Object.fromEntries(results.map(item => [item.platform, item])) as Partial<Record<PlatformId, PreparedPlatform>>);
       setPublishOpen(true);
-    } catch (error) { onNotice(error instanceof Error ? error.message : '发布准备失败'); }
+      onNotice('四个平台版本已生成，可逐个平台复制并发布。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : '多平台发布准备失败'); }
     finally { setBusy(''); }
   };
 
@@ -316,7 +366,7 @@ export function BlogWorkbench({
     <div className="blog-config-grid">
       <section className="plain-block blog-config-card">
         <div className="blog-card-title"><FilePenLine /><div><strong>写作设置</strong><span>先选路径，再进入初稿</span></div></div>
-        <label htmlFor="blog-writing-mode">写作方式<select id="blog-writing-mode" value={mode} onChange={(event) => { setMode(event.target.value as WritingMode); invalidateOutcome(); }}><option value="ai">完全 AI 写</option><option value="revise">已有文章 · AI 辅助改</option></select></label>
+        <label htmlFor="blog-writing-mode">写作方式<select id="blog-writing-mode" value={mode} onChange={(event) => { setMode(event.target.value as WritingMode); invalidateOutcome(); }}><option value="manual">自己创作</option><option value="ai">AI 从知识源写</option><option value="revise">修改已有文章</option></select></label>
         <label htmlFor="blog-material-kind">材料类型<select id="blog-material-kind" value={materialKind} onChange={(event) => { setMaterialKind(event.target.value as MaterialKind); setVisualVerified(false); invalidateOutcome(); }}><option value="markdown">Markdown / 代码</option><option value="visual">PDF / 板书 / 图片</option></select></label>
         {materialKind === 'visual' && <div className="blog-visual-proof"><label htmlFor="blog-visual-evidence">渲染 / OCR 核验记录<Textarea id="blog-visual-evidence" value={visualEvidence} onChange={(event) => { setVisualEvidence(event.target.value); setVisualVerified(false); invalidateOutcome(); }} rows={3} placeholder="填写已核对的页面、图示要点或 OCR 结果笔记路径；工作台本身不伪装已完成 OCR" /></label><label aria-label="确认视觉材料已完成渲染或 OCR 核对" className="blog-check" htmlFor="blog-visual-verified"><input id="blog-visual-verified" type="checkbox" disabled={!visualEvidence.trim()} checked={visualVerified} onChange={(event) => { setVisualVerified(event.target.checked); invalidateOutcome(); }} /><span><strong>我已真正核对图像</strong><small>必须先留下核验记录；未核验时禁止审核与写入</small></span></label></div>}
         <label htmlFor="blog-focus">文章重点<Textarea id="blog-focus" value={focus} onChange={(event) => { setFocus(event.target.value); setFocusDecision('pending'); invalidateOutcome(); }} rows={3} /></label>
@@ -332,7 +382,7 @@ export function BlogWorkbench({
     </div>
 
     <section className="plain-block blog-source-card">
-      <div className="blog-card-title"><Library /><div><strong>写作材料</strong><span>{source ? source.path : mode === 'revise' ? '可直接在编辑器粘贴已有文章' : '选择一篇 Obsidian 知识笔记'}</span></div></div>
+      <div className="blog-card-title"><Library /><div><strong>写作材料</strong><span>{source ? source.path : mode === 'manual' ? '从空白开始创作，也可以导入 Markdown' : mode === 'revise' ? '导入文件或打开 Obsidian 中的已有文章' : '选择一篇 Obsidian 知识笔记'}</span></div></div>
       <form onSubmit={searchSources}><Input value={sourceQuery} onChange={(event) => setSourceQuery(event.target.value)} placeholder="搜索标题、正文或路径" /><Button type="submit" variant="outline" disabled={busy === 'search'}>{busy === 'search' ? <Loader2 className="spin" /> : <Search />}搜索</Button></form>
       {sources.length > 0 && <div className="blog-source-results">{sources.map((item) => <button key={item.path} onClick={() => selectSource(item)}><span><strong>{item.title}</strong><small>{item.path}</small></span><Badge variant="outline">选择</Badge></button>)}</div>}
     </section>
@@ -340,26 +390,26 @@ export function BlogWorkbench({
     <section className="plain-block blog-editor-card">
       <header>
         <div><strong>Markdown 初稿</strong><span>{draftPath ? dirty ? '有未保存修改' : `已写入 ${draftPath}` : '尚未写入文件'}</span></div>
-        <div className="blog-inline-actions"><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />已有草稿</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={!canGenerate || Boolean(busy)}>创建安全模板</Button>}<Button onClick={() => generateDraft(true)} disabled={!canGenerate || Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button></div>
+        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={!canGenerate || Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={() => generateDraft(true)} disabled={!canGenerate || Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
       </header>
       {drafts.length > 0 && <div className="blog-draft-list">{drafts.map((item) => <button key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path}</small></span><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></button>)}</div>}
       <label className="blog-title-field" htmlFor="blog-title">文章标题<Input id="blog-title" value={title} onChange={(event) => { setTitle(event.target.value); setRetrieval(null); invalidateOutcome(); }} maxLength={100} placeholder="输入文章标题" /></label>
-      <label className="blog-instruction-field" htmlFor="blog-instruction">本次要求<Input id="blog-instruction" value={instruction} onChange={(event) => { setInstruction(event.target.value); setFinalized(false); setPublishPack(null); setPrepared(null); }} /></label>
-      <div className="blog-editor-grid"><Textarea value={draft} onChange={(event) => changeDraft(event.target.value)} rows={24} placeholder={mode === 'revise' ? '粘贴你已经写好的 Markdown…' : '完成预检并选择知识源后生成初稿…'} /><div className="blog-preview"><span>安全文本预览</span><pre>{preview}</pre></div></div>
+      <label className="blog-instruction-field" htmlFor="blog-instruction">本次要求<Input id="blog-instruction" value={instruction} onChange={(event) => { setInstruction(event.target.value); setFinalized(false); setPublishPack(null); setPreparedPlatforms({}); }} /></label>
+      <div className="blog-editor-grid"><Textarea value={draft} onChange={(event) => changeDraft(event.target.value)} rows={24} placeholder={mode === 'manual' ? '从这里开始写 Markdown…' : mode === 'revise' ? '粘贴或导入你已经写好的 Markdown…' : '完成预检并选择知识源后生成初稿…'} /><div className="blog-preview"><span>安全文本预览</span><pre>{preview}</pre></div></div>
       <footer><span>{draft ? `${draft.split(/\r?\n/).length} 行 · ${draft.replace(/\s/g, '').length.toLocaleString('zh-CN')} 字` : '0 行 · 0 字'}</span><div className="blog-inline-actions"><Button variant="outline" onClick={reviewDraft} disabled={!draft || !workflowReady || busy === 'review'}><ShieldCheck />审核检查</Button><Button onClick={() => setSaveOpen(true)} disabled={!workflowReady || !review || review.blockers.length > 0 || Boolean(busy)}><Save />确认后写入</Button></div></footer>
     </section>
 
     <div className="blog-finish-grid">
       <section className="plain-block blog-finish-card"><div className="blog-card-title"><FileCheck2 /><div><strong>审核与定稿</strong><span>修改正文会自动撤销审核和定稿状态</span></div></div>{review ? <div className="blog-review-result"><strong>{review.blockers.length ? `${review.blockers.length} 个阻塞项` : '没有阻塞项'}</strong><span>{review.warnings.length} 条提醒 · {review.diagramLines.length} 行图示超宽 · {review.longArticle ? '长文将分段写入' : '普通整稿写入'}</span>{[...review.blockers, ...review.warnings].map((item) => <small key={item}>△ {item}</small>)}</div> : <div className="blog-pending"><TriangleAlert />尚未审核</div>}<label htmlFor="blog-humanizer">去 AI 味<select id="blog-humanizer" value={humanizer} onChange={(event) => { setHumanizer(event.target.value as HumanizerStatus); setFinalized(false); setPublishPack(null); }}><option value="pending">未执行</option><option value="checked">已完成人工表达检查</option><option value="skipped">明确跳过</option></select></label><Button onClick={finalize} disabled={!canFinalize}><LockKeyhole />确认文章定稿</Button></section>
 
-      <section className="plain-block blog-finish-card"><div className="blog-card-title"><Send /><div><strong>发布文案</strong><span>只在明确定稿后生成，不写入文章正文</span></div></div><div className="blog-inline-actions"><Button variant="outline" onClick={createPublishPack} disabled={!finalized || Boolean(busy)}>生成平台文案</Button><Button onClick={prepareCsdn} disabled={!finalized || Boolean(busy)}>准备发布到 CSDN</Button></div>{publishPack ? <div className="blog-publish-pack"><label>CSDN 简介（{publishPack.csdnIntro.length}/256）<Textarea readOnly value={publishPack.csdnIntro} rows={3} /></label><label>小红书标题（{publishPack.xiaohongshuTitle.length}/20）<Input readOnly value={publishPack.xiaohongshuTitle} /></label><label>小红书介绍（{publishPack.xiaohongshuIntro.length}/100）<Textarea readOnly value={publishPack.xiaohongshuIntro} rows={3} /></label></div> : <div className="blog-pending"><Clipboard />尚未生成发布文案</div>}</section>
+      <section className="plain-block blog-finish-card"><div className="blog-card-title"><Send /><div><strong>多平台同步</strong><span>一次生成适配稿，再由你逐个平台确认发布</span></div></div><div className="blog-inline-actions"><Button variant="outline" onClick={createPublishPack} disabled={!finalized || Boolean(busy)}>生成推广文案</Button><Button onClick={preparePlatforms} disabled={!finalized || Boolean(busy)}>生成四平台版本</Button></div>{publishPack ? <div className="blog-publish-pack"><label>CSDN 简介（{publishPack.csdnIntro.length}/256）<Textarea readOnly value={publishPack.csdnIntro} rows={3} /></label><label>小红书标题（{publishPack.xiaohongshuTitle.length}/20）<Input readOnly value={publishPack.xiaohongshuTitle} /></label><label>小红书介绍（{publishPack.xiaohongshuIntro.length}/100）<Textarea readOnly value={publishPack.xiaohongshuIntro} rows={3} /></label></div> : <div className="blog-pending"><Clipboard />定稿后生成 CSDN、掘金、知乎和微信公众号版本</div>}</section>
 
       <section className="plain-block blog-finish-card blog-closure-card"><div className="blog-card-title"><Library /><div><strong>收尾入库</strong><span>先预览、再去重，最后由你审批写入唯一知识库</span></div></div><div className="blog-closure-fields"><Input value={closure.preference} onChange={(event) => setClosure({ ...closure, preference: event.target.value })} placeholder="新增偏好（可留空）" /><Input value={closure.style} onChange={(event) => setClosure({ ...closure, style: event.target.value })} placeholder="新增文风（可留空）" /><Input value={closure.requirement} onChange={(event) => setClosure({ ...closure, requirement: event.target.value })} placeholder="新增需求（可留空）" /><Input value={closure.pitfall} onChange={(event) => setClosure({ ...closure, pitfall: event.target.value })} placeholder="新增坑记录（可留空）" /></div><Button onClick={buildClosurePreview} disabled={!finalized || Boolean(busy)}><BookCheck />展示收尾入库预览</Button></section>
     </div>
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>准备发布到 CSDN</DialogTitle><DialogDescription>下面的操作只复制内容并打开官方编辑器，不会读取 Cookie 或替你点击最终发布。</DialogDescription></DialogHeader>{prepared && <><div className="blog-confirm-summary"><strong>{prepared.title}</strong><span>{prepared.characters.toLocaleString('zh-CN')} 字 · {prepared.warnings.length} 条提醒</span></div>{prepared.warnings.length > 0 && <div className="blog-warning-list">{prepared.warnings.map((item) => <small key={item}>△ {item}</small>)}</div>}<DialogFooter><Button variant="outline" onClick={async () => { await copyText(prepared.title); onNotice('标题已复制。'); }}><Clipboard />复制标题</Button><Button onClick={async () => { const opened = window.open(prepared.editorUrl, '_blank'); if (opened) opened.opener = null; await copyText(prepared.content); onNotice('正文已复制；请在 CSDN 检查后完成最终发布。'); }}><ExternalLink />复制正文并打开 CSDN</Button></DialogFooter></>}</DialogContent></Dialog>
+    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台发布中心</DialogTitle><DialogDescription>适配稿已移除 Obsidian frontmatter 和 WikiLink。工作台不会读取平台账号信息，也不会替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button onClick={async () => { await copyText(item.content); const opened = window.open(item.editorUrl, '_blank'); if (opened) opened.opener = null; onNotice(`${platform.name} 正文已复制，请在官方编辑器检查后发布。`); }}><ExternalLink />复制正文并打开</Button></div></article>; })}</div></DialogContent></Dialog>
 
     <Dialog open={closureOpen} onOpenChange={setClosureOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>收尾入库预览</DialogTitle><DialogDescription>未审批前不会写入长期记忆。重复条目会自动跳过。</DialogDescription></DialogHeader>{closurePreview && <div className="blog-closure-preview"><pre>{closurePreview.summary}</pre>{closurePreview.entries.map((item) => <div key={`${item.category}-${item.value}`}><Badge variant="outline">{item.duplicate ? '重复·跳过' : '拟写入'}</Badge><span><strong>{item.category}</strong><small>{item.value}</small><small>{item.target}</small></span></div>)}</div>}<DialogFooter><Button variant="outline" onClick={() => setClosureOpen(false)}>返回修改</Button><Button onClick={commitClosure} disabled={busy === 'closure-save'}>{busy === 'closure-save' ? <Loader2 className="spin" /> : <Check />}审批并写入知识库</Button></DialogFooter></DialogContent></Dialog>
   </div>;

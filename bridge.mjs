@@ -405,19 +405,31 @@ export async function commitClosure(data, root = DEFAULT_VAULT) {
   return { written: writtenTargets.length, skipped, eventLogged, writtenTargets };
 }
 
-export function prepareCsdnPayload({ title, content }) {
+const PUBLISH_PLATFORMS = {
+  csdn: { name: 'CSDN', editorUrl: 'https://editor.csdn.net/md/', format: 'Markdown' },
+  juejin: { name: '掘金', editorUrl: 'https://juejin.cn/editor/drafts/new?v=2', format: 'Markdown' },
+  zhihu: { name: '知乎', editorUrl: 'https://zhuanlan.zhihu.com/write', format: 'Markdown / 富文本' },
+  wechat: { name: '微信公众号', editorUrl: 'https://mp.weixin.qq.com/', format: '富文本' },
+};
+
+export function preparePlatformPayload({ platform = 'csdn', title, content }) {
+  const target = PUBLISH_PLATFORMS[platform];
+  if (!target) throw apiError('不支持的发布平台', 'invalid_platform');
   const cleanTitle = String(title || '').trim();
   const source = String(content || '').replace(/\r\n?/g, '\n');
   if (!cleanTitle || !source.trim()) throw apiError('标题和正文不能为空');
   if (source.length > 200000) throw apiError('草稿过长，请控制在 20 万字符以内', 'draft_too_large');
 
   const warnings = [];
-  if (/!\[\[[^\]]+\]\]/.test(source)) warnings.push('Obsidian 附件不会自动上传，已在正文中标记待重新上传');
-  if (/!\[[^\]]*\]\((?!https?:\/\/|data:)[^)]+\)/i.test(source)) warnings.push('检测到本地 Markdown 图片，请在 CSDN 中重新上传');
+  if (/!\[\[[^\]]+\]\]/.test(source)) warnings.push(`Obsidian 附件不会自动上传，已标记在 ${target.name} 中重新上传`);
+  if (/!\[[^\]]*\]\((?!https?:\/\/|data:)[^)]+\)/i.test(source)) warnings.push(`检测到本地 Markdown 图片，请在 ${target.name} 中重新上传`);
   if (/待补充|待确认|TODO/i.test(source)) warnings.push('正文仍包含待补充或待确认标记');
+  if (platform === 'zhihu') warnings.push('粘贴后请检查知乎中的代码块、表格和标题层级');
+  if (platform === 'wechat') warnings.push('微信公众号不会直接保留全部 Markdown 格式，请粘贴后检查排版');
 
   let markdown = withoutFrontmatter(source)
-    .replace(/!\[\[([^\]]+)\]\]/g, (_, target) => `> ⚠️ 请在 CSDN 重新上传 Obsidian 附件：${target}`)
+    .replace(/!\[\[([^\]]+)\]\]/g, (_, attachment) => `> ⚠️ 请在 ${target.name} 重新上传 Obsidian 附件：${attachment}`)
+    .replace(/!\[([^\]]*)\]\(((?!https?:\/\/|data:)[^)]+)\)/gi, (_, alt, imagePath) => `> ⚠️ 请在 ${target.name} 重新上传本地图片：${alt || imagePath}`)
     .replace(/\[\[([^\]]+)\]\]/g, (_, value) => {
       const [target, alias] = value.split('|');
       if (alias?.trim()) return alias.trim();
@@ -426,12 +438,19 @@ export function prepareCsdnPayload({ title, content }) {
     .trim();
   if (!/^#\s+/m.test(markdown)) markdown = `# ${cleanTitle}\n\n${markdown}`;
   return {
+    platform,
+    platformName: target.name,
     title: cleanTitle,
     content: `${markdown}\n`,
     characters: markdown.replace(/\s/g, '').length,
     warnings,
-    editorUrl: 'https://editor.csdn.net/md/'
+    editorUrl: target.editorUrl,
+    format: target.format,
   };
+}
+
+export function prepareCsdnPayload(data) {
+  return preparePlatformPayload({ ...data, platform: 'csdn' });
 }
 
 export async function searchNotes(query = '', limit = 10, root = DEFAULT_VAULT) {
@@ -455,7 +474,7 @@ export async function searchNotes(query = '', limit = 10, root = DEFAULT_VAULT) 
 function frontmatter(title, sourcePath, aiGenerated) {
   const date = new Date().toISOString().slice(0, 10);
   const source = sourcePath ? `"[[${sourcePath.replace(/\.md$/i, '')}]]"` : '"用户原创"';
-  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: knowledge\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
+  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: ${sourcePath ? 'knowledge' : 'original'}\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
 }
 
 function templateBody(title, sourcePath, sourceContent, instruction) {
@@ -539,7 +558,8 @@ export async function saveDraft({
   } catch (error) {
     if (error.code && error.code !== 'ENOENT') throw error;
   }
-  const normalized = `${String(content).trim()}\n`;
+  const authored = String(content).trim();
+  const normalized = `${authored.startsWith('---\n') ? authored : `${frontmatter(String(title).trim(), sourcePath, false)}\n\n${authored}`}\n`;
   const audit = reviewCsdnDraft({ title, content: normalized });
   if (audit.blockers.length) throw apiError(`草稿仍有阻塞项：${audit.blockers.join('；')}`, 'review_blocked');
   const sections = audit.longArticle ? splitMarkdownSections(normalized) : [normalized];
@@ -763,6 +783,7 @@ async function route(action, data, root) {
   if (action === 'review_csdn') return reviewCsdnDraft(data);
   if (action === 'save_csdn') return saveDraft(data, root);
   if (action === 'prepare_csdn') return prepareCsdnPayload(data);
+  if (action === 'prepare_platform') return preparePlatformPayload(data);
   if (action === 'publish_pack') return createPublishPack(data);
   if (action === 'closure_preview') return previewClosure(data, root);
   if (action === 'commit_closure') return commitClosure(data, root);

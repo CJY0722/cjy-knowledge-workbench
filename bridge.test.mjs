@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, prepareCsdnPayload,
+  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, prepareCsdnPayload, preparePlatformPayload,
   previewClosure, reviewCsdnDraft, sanitizeFileName, saveDraft, searchNotes, writingPreflight,
 } from './bridge.mjs';
 
@@ -86,6 +86,26 @@ test('prepares Obsidian markdown for the official CSDN editor', () => {
   assert.match(result.content, /请在 CSDN 重新上传 Obsidian 附件：截图.png/);
   assert.equal(result.warnings.length, 2);
   assert.equal(result.editorUrl, 'https://editor.csdn.net/md/');
+
+  const platforms = ['csdn', 'juejin', 'zhihu', 'wechat'].map(platform => preparePlatformPayload({
+    platform,
+    title: '多平台文章',
+    content: '# 多平台文章\n\n正文来自 [[知识笔记]]。',
+  }));
+  assert.deepEqual(platforms.map(item => item.platform), ['csdn', 'juejin', 'zhihu', 'wechat']);
+  assert.equal(platforms.every(item => item.content.includes('正文来自 知识笔记')), true);
+  assert.match(platforms.find(item => item.platform === 'wechat').warnings.join('；'), /Markdown/);
+  assert.throws(() => preparePlatformPayload({ platform: 'unknown', title: '标题', content: '正文' }), error => error.code === 'invalid_platform');
+});
+
+test('saves a self-authored article with Obsidian metadata', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-manual-'));
+  const content = '# 我的原创文章\n\n## 观点\n\n这是原创内容。\n\n## 结论\n\n完成。';
+  const result = await saveDraft({ title: '我的原创文章', content, approved: true, preflightConfirmed: true, focusDecision: 'confirmed', reviewConfirmed: true }, root);
+  const saved = await readFile(path.join(root, result.path), 'utf8');
+  assert.match(saved, /source: "用户原创"/);
+  assert.match(saved, /source_type: original/);
+  assert.match(saved, /ai_generated: false/);
 });
 
 test('searches a source, generates a safe template, and versions saves', async () => {
