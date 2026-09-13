@@ -406,11 +406,99 @@ export async function commitClosure(data, root = DEFAULT_VAULT) {
 }
 
 const PUBLISH_PLATFORMS = {
-  csdn: { name: 'CSDN', editorUrl: 'https://editor.csdn.net/md/', format: 'Markdown' },
-  juejin: { name: '掘金', editorUrl: 'https://juejin.cn/editor/drafts/new?v=2', format: 'Markdown' },
-  zhihu: { name: '知乎', editorUrl: 'https://zhuanlan.zhihu.com/write', format: 'Markdown / 富文本' },
-  wechat: { name: '微信公众号', editorUrl: 'https://mp.weixin.qq.com/', format: '富文本' },
+  csdn: { name: 'CSDN', editorUrl: 'https://editor.csdn.net/md/', format: '标准 Markdown', kind: 'markdown' },
+  juejin: { name: '掘金', editorUrl: 'https://juejin.cn/editor/drafts/new?v=2', format: '标准 Markdown', kind: 'markdown' },
+  zhihu: { name: '知乎', editorUrl: 'https://zhuanlan.zhihu.com/write', format: '富文本兼容稿', kind: 'rich-text' },
+  wechat: { name: '微信公众号', editorUrl: 'https://mp.weixin.qq.com/', format: '富文本兼容稿', kind: 'rich-text' },
+  xiaohongshu: { name: '小红书', editorUrl: 'https://creator.xiaohongshu.com/publish/publish', format: '长文纯文本 + 3:4 图卡', kind: 'plain-text' },
 };
+
+const CALLOUT_LABELS = {
+  note: '备注', tip: '提示', info: '说明', warning: '注意', caution: '注意',
+  important: '重要', question: '问题', example: '示例', quote: '引用', bug: '问题',
+  success: '完成', failure: '警告', danger: '警告',
+};
+
+function markdownTarget(rawTarget) {
+  const [notePart, ...headingParts] = String(rawTarget).trim().split('#');
+  let note = notePart.trim();
+  if (note && !/\.[a-z0-9]+$/i.test(note)) note += '.md';
+  const heading = headingParts.join('#').trim();
+  return `${note.replaceAll(' ', '%20')}${heading ? `#${heading.replaceAll(' ', '-')}` : ''}`;
+}
+
+export function obsidianToStandardMarkdown(value) {
+  const source = withoutFrontmatter(String(value || '').replace(/\r\n?/g, '\n'));
+  return source
+    .replace(/%%[\s\S]*?%%/g, '')
+    .replace(/^>\s*\[!([a-z-]+)\][+-]?\s*(.*)$/gim, (_, kind, title) => {
+      const label = CALLOUT_LABELS[String(kind).toLowerCase()] || String(kind).toUpperCase();
+      return `> **${label}${title.trim() ? `：${title.trim()}` : ''}**`;
+    })
+    .replace(/!\[\[([^\]]+)\]\]/g, (_, value) => {
+      const [rawTarget, rawAlias] = value.split('|');
+      const target = rawTarget.trim();
+      const fileName = target.split('/').at(-1).split('#')[0];
+      const isImage = /\.(?:avif|gif|jpe?g|png|svg|webp)$/i.test(fileName);
+      const alias = rawAlias?.trim() && !/^\d+(?:x\d+)?$/i.test(rawAlias.trim()) ? rawAlias.trim() : fileName.replace(/\.[^.]+$/, '');
+      return isImage ? `![${alias}](${target.replaceAll(' ', '%20')})` : `[嵌入：${alias}](${markdownTarget(target)})`;
+    })
+    .replace(/\[\[([^\]]+)\]\]/g, (_, value) => {
+      const [rawTarget, rawAlias] = value.split('|');
+      const target = rawTarget.trim();
+      const alias = rawAlias?.trim() || target.split('/').at(-1).replace('#', ' · ');
+      return `[${alias}](${markdownTarget(target)})`;
+    })
+    .replace(/==([^=\n]+)==/g, '**$1**')
+    .replace(/\s+\^[a-z0-9-]+$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function markdownToPlatformText(value) {
+  return String(value || '')
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) => `【代码】\n${code.trim()}\n【代码结束】`)
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+\[[ xX]\]\s+/gm, '• ')
+    .replace(/^\s*[-*+]\s+/gm, '• ')
+    .replace(/^\s*(\d+)[.)]\s+/gm, '$1、')
+    .replace(/^\s*[-*_]{3,}\s*$/gm, '')
+    .replace(/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, '')
+    .replace(/^\s*\|(.+)\|\s*$/gm, (_, row) => row.split('|').map(cell => cell.trim()).join(' ｜ '))
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => `【图片：${alt || url}，请重新上传】`)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1（$2）')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\[\^([^\]]+)\]:\s*/gm, '注$1：')
+    .replace(/\[\^([^\]]+)\]/g, '（注$1）')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/~~([^~\n]+)~~/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/<[^>\n]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function splitXiaohongshuCards(value, maxLines = 16, maxCharacters = 18) {
+  const lines = [];
+  for (const rawLine of String(value || '').split('\n')) {
+    const characters = Array.from(rawLine.trim());
+    if (!characters.length) {
+      if (lines.at(-1) !== '') lines.push('');
+      continue;
+    }
+    for (let index = 0; index < characters.length; index += maxCharacters) {
+      lines.push(characters.slice(index, index + maxCharacters).join(''));
+    }
+  }
+  while (lines.at(-1) === '') lines.pop();
+  const pages = [];
+  for (let index = 0; index < lines.length; index += maxLines) pages.push(lines.slice(index, index + maxLines).join('\n'));
+  return pages.length ? pages : [''];
+}
 
 export function preparePlatformPayload({ platform = 'csdn', title, content }) {
   const target = PUBLISH_PLATFORMS[platform];
@@ -421,31 +509,34 @@ export function preparePlatformPayload({ platform = 'csdn', title, content }) {
   if (source.length > 200000) throw apiError('草稿过长，请控制在 20 万字符以内', 'draft_too_large');
 
   const warnings = [];
-  if (/!\[\[[^\]]+\]\]/.test(source)) warnings.push(`Obsidian 附件不会自动上传，已标记在 ${target.name} 中重新上传`);
+  if (/!\[\[[^\]]+\]\]/.test(source)) warnings.push(`Obsidian 附件已转为标准引用，但仍需在 ${target.name} 重新上传`);
   if (/!\[[^\]]*\]\((?!https?:\/\/|data:)[^)]+\)/i.test(source)) warnings.push(`检测到本地 Markdown 图片，请在 ${target.name} 中重新上传`);
   if (/待补充|待确认|TODO/i.test(source)) warnings.push('正文仍包含待补充或待确认标记');
-  if (platform === 'zhihu') warnings.push('粘贴后请检查知乎中的代码块、表格和标题层级');
-  if (platform === 'wechat') warnings.push('微信公众号不会直接保留全部 Markdown 格式，请粘贴后检查排版');
+  if (/```(?:dataview|dataviewjs)|```query/i.test(source)) warnings.push('Obsidian 查询块不会在外部平台运行，请转成静态文字或截图');
 
-  let markdown = withoutFrontmatter(source)
-    .replace(/!\[\[([^\]]+)\]\]/g, (_, attachment) => `> ⚠️ 请在 ${target.name} 重新上传 Obsidian 附件：${attachment}`)
-    .replace(/!\[([^\]]*)\]\(((?!https?:\/\/|data:)[^)]+)\)/gi, (_, alt, imagePath) => `> ⚠️ 请在 ${target.name} 重新上传本地图片：${alt || imagePath}`)
-    .replace(/\[\[([^\]]+)\]\]/g, (_, value) => {
-      const [target, alias] = value.split('|');
-      if (alias?.trim()) return alias.trim();
-      return target.trim().split('/').at(-1).replace('#', ' · ');
-    })
-    .trim();
+  let markdown = obsidianToStandardMarkdown(source);
   if (!/^#\s+/m.test(markdown)) markdown = `# ${cleanTitle}\n\n${markdown}`;
+  let prepared = markdown;
+  if (target.kind === 'rich-text') {
+    prepared = markdownToPlatformText(markdown);
+    warnings.push(`${target.name} 已生成富文本兼容稿；粘贴后请检查图片、代码块、表格和标题层级`);
+  }
+  if (target.kind === 'plain-text') {
+    prepared = markdownToPlatformText(markdown);
+    warnings.push('已移除标题、链接、强调等 Markdown 标记，适合作为小红书长文底稿');
+  }
+  const cardPages = platform === 'xiaohongshu' ? splitXiaohongshuCards(prepared) : undefined;
+  if (cardPages) warnings.push(`已按段落拆分为 ${cardPages.length} 张 3:4 图卡，请下载后逐张上传`);
   return {
     platform,
     platformName: target.name,
     title: cleanTitle,
-    content: `${markdown}\n`,
-    characters: markdown.replace(/\s/g, '').length,
+    content: `${prepared}\n`,
+    characters: prepared.replace(/\s/g, '').length,
     warnings,
     editorUrl: target.editorUrl,
     format: target.format,
+    ...(cardPages ? { cardPages } : {}),
   };
 }
 

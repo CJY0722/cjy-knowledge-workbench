@@ -25,8 +25,9 @@ type ReviewResult = {
   characters: number;
 };
 type PublishPack = { csdnIntro: string; xiaohongshuTitle: string; xiaohongshuIntro: string };
-type PlatformId = 'csdn' | 'juejin' | 'zhihu' | 'wechat';
-type PreparedPlatform = { platform: PlatformId; platformName: string; title: string; content: string; characters: number; warnings: string[]; editorUrl: string; format: string };
+type PlatformId = 'csdn' | 'juejin' | 'zhihu' | 'wechat' | 'xiaohongshu';
+type PreparedPlatform = { platform: PlatformId; platformName: string; title: string; content: string; characters: number; warnings: string[]; editorUrl: string; format: string; cardPages?: string[] };
+type XiaohongshuCard = { dataUrl: string; filename: string };
 type ClosurePreview = { summary: string; entries: Array<{ category: string; value: string; target: string; duplicate: boolean }>; event: string };
 type WritingMode = 'manual' | 'ai' | 'revise';
 type HumanizerStatus = 'pending' | 'checked' | 'skipped';
@@ -38,7 +39,37 @@ const PLATFORMS: Array<{ id: PlatformId; name: string }> = [
   { id: 'juejin', name: '掘金' },
   { id: 'zhihu', name: '知乎' },
   { id: 'wechat', name: '微信公众号' },
+  { id: 'xiaohongshu', name: '小红书' },
 ];
+
+function renderXiaohongshuCard(page: string, title: string, index: number, total: number): XiaohongshuCard {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1440;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法生成图文卡片');
+  context.fillStyle = '#f6f3eb';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#315f49';
+  context.fillRect(0, 0, 18, canvas.height);
+  context.fillStyle = '#315f49';
+  context.font = '600 34px "Microsoft YaHei UI", sans-serif';
+  context.fillText('CJY · 知识工作台', 82, 92);
+  context.fillStyle = '#20251f';
+  context.font = '600 45px "Microsoft YaHei UI", sans-serif';
+  const lines = page.split('\n');
+  lines.forEach((line, lineIndex) => context.fillText(line || ' ', 82, 190 + lineIndex * 68));
+  context.fillStyle = '#6c746c';
+  context.font = '28px "Microsoft YaHei UI", sans-serif';
+  context.fillText(`${index + 1} / ${total}`, 82, 1360);
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 40) || '小红书图文';
+  return { dataUrl: canvas.toDataURL('image/png'), filename: `${safeTitle}-${String(index + 1).padStart(2, '0')}.png` };
+}
+
+function XiaohongshuCardPreview({ card, index }: { card: XiaohongshuCard; index: number }) {
+  // oxlint-disable-next-line next/no-img-element -- local canvas data URL cannot use the framework image optimizer
+  return <img src={card.dataUrl} alt={`小红书图文卡片第 ${index + 1} 张`} />;
+}
 
 async function copyText(value: string) {
   const input = document.createElement('textarea');
@@ -95,6 +126,7 @@ export function BlogWorkbench({
   const [finalized, setFinalized] = useState(false);
   const [publishPack, setPublishPack] = useState<PublishPack | null>(null);
   const [preparedPlatforms, setPreparedPlatforms] = useState<Partial<Record<PlatformId, PreparedPlatform>>>({});
+  const [xiaohongshuCards, setXiaohongshuCards] = useState<XiaohongshuCard[]>([]);
   const [drafts, setDrafts] = useState<DraftNote[]>([]);
   const [busy, setBusy] = useState('');
   const [saveOpen, setSaveOpen] = useState(false);
@@ -165,6 +197,7 @@ export function BlogWorkbench({
     setFinalized(false);
     setPublishPack(null);
     setPreparedPlatforms({});
+    setXiaohongshuCards([]);
     setClosurePreview(null);
   };
 
@@ -330,8 +363,10 @@ export function BlogWorkbench({
     try {
       const results = await Promise.all(PLATFORMS.map(({ id }) => request<PreparedPlatform>('prepare_platform', { platform: id, title, content: draft })));
       setPreparedPlatforms(Object.fromEntries(results.map(item => [item.platform, item])) as Partial<Record<PlatformId, PreparedPlatform>>);
+      const pages = results.find(item => item.platform === 'xiaohongshu')?.cardPages || [];
+      setXiaohongshuCards(pages.map((page, index) => renderXiaohongshuCard(page, title, index, pages.length)));
       setPublishOpen(true);
-      onNotice('四个平台版本已生成，可逐个平台复制并发布。');
+      onNotice('五个平台的适配物料已生成，可复制长文或下载小红书图卡。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '多平台发布准备失败'); }
     finally { setBusy(''); }
   };
@@ -402,14 +437,14 @@ export function BlogWorkbench({
     <div className="blog-finish-grid">
       <section className="plain-block blog-finish-card"><div className="blog-card-title"><FileCheck2 /><div><strong>审核与定稿</strong><span>修改正文会自动撤销审核和定稿状态</span></div></div>{review ? <div className="blog-review-result"><strong>{review.blockers.length ? `${review.blockers.length} 个阻塞项` : '没有阻塞项'}</strong><span>{review.warnings.length} 条提醒 · {review.diagramLines.length} 行图示超宽 · {review.longArticle ? '长文将分段写入' : '普通整稿写入'}</span>{[...review.blockers, ...review.warnings].map((item) => <small key={item}>△ {item}</small>)}</div> : <div className="blog-pending"><TriangleAlert />尚未审核</div>}<label htmlFor="blog-humanizer">去 AI 味<select id="blog-humanizer" value={humanizer} onChange={(event) => { setHumanizer(event.target.value as HumanizerStatus); setFinalized(false); setPublishPack(null); }}><option value="pending">未执行</option><option value="checked">已完成人工表达检查</option><option value="skipped">明确跳过</option></select></label><Button onClick={finalize} disabled={!canFinalize}><LockKeyhole />确认文章定稿</Button></section>
 
-      <section className="plain-block blog-finish-card"><div className="blog-card-title"><Send /><div><strong>多平台同步</strong><span>一次生成适配稿，再由你逐个平台确认发布</span></div></div><div className="blog-inline-actions"><Button variant="outline" onClick={createPublishPack} disabled={!finalized || Boolean(busy)}>生成推广文案</Button><Button onClick={preparePlatforms} disabled={!finalized || Boolean(busy)}>生成四平台版本</Button></div>{publishPack ? <div className="blog-publish-pack"><label>CSDN 简介（{publishPack.csdnIntro.length}/256）<Textarea readOnly value={publishPack.csdnIntro} rows={3} /></label><label>小红书标题（{publishPack.xiaohongshuTitle.length}/20）<Input readOnly value={publishPack.xiaohongshuTitle} /></label><label>小红书介绍（{publishPack.xiaohongshuIntro.length}/100）<Textarea readOnly value={publishPack.xiaohongshuIntro} rows={3} /></label></div> : <div className="blog-pending"><Clipboard />定稿后生成 CSDN、掘金、知乎和微信公众号版本</div>}</section>
+      <section className="plain-block blog-finish-card"><div className="blog-card-title"><Send /><div><strong>多平台同步</strong><span>按平台规范生成 Markdown、富文本、纯文本和图卡</span></div></div><div className="blog-inline-actions"><Button variant="outline" onClick={createPublishPack} disabled={!finalized || Boolean(busy)}>生成推广文案</Button><Button onClick={preparePlatforms} disabled={!finalized || Boolean(busy)}>生成五平台物料</Button></div>{publishPack ? <div className="blog-publish-pack"><label>CSDN 简介（{publishPack.csdnIntro.length}/256）<Textarea readOnly value={publishPack.csdnIntro} rows={3} /></label><label>小红书标题（{publishPack.xiaohongshuTitle.length}/20）<Input readOnly value={publishPack.xiaohongshuTitle} /></label><label>小红书介绍（{publishPack.xiaohongshuIntro.length}/100）<Textarea readOnly value={publishPack.xiaohongshuIntro} rows={3} /></label></div> : <div className="blog-pending"><Clipboard />定稿后生成五个平台的适配物料</div>}</section>
 
       <section className="plain-block blog-finish-card blog-closure-card"><div className="blog-card-title"><Library /><div><strong>收尾入库</strong><span>先预览、再去重，最后由你审批写入唯一知识库</span></div></div><div className="blog-closure-fields"><Input value={closure.preference} onChange={(event) => setClosure({ ...closure, preference: event.target.value })} placeholder="新增偏好（可留空）" /><Input value={closure.style} onChange={(event) => setClosure({ ...closure, style: event.target.value })} placeholder="新增文风（可留空）" /><Input value={closure.requirement} onChange={(event) => setClosure({ ...closure, requirement: event.target.value })} placeholder="新增需求（可留空）" /><Input value={closure.pitfall} onChange={(event) => setClosure({ ...closure, pitfall: event.target.value })} placeholder="新增坑记录（可留空）" /></div><Button onClick={buildClosurePreview} disabled={!finalized || Boolean(busy)}><BookCheck />展示收尾入库预览</Button></section>
     </div>
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台发布中心</DialogTitle><DialogDescription>适配稿已移除 Obsidian frontmatter 和 WikiLink。工作台不会读取平台账号信息，也不会替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button onClick={async () => { await copyText(item.content); const opened = window.open(item.editorUrl, '_blank'); if (opened) opened.opener = null; onNotice(`${platform.name} 正文已复制，请在官方编辑器检查后发布。`); }}><ExternalLink />复制正文并打开</Button></div></article>; })}</div></DialogContent></Dialog>
+    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料中心</DialogTitle><DialogDescription>Obsidian 特有语法已在出站时转换；图片、代码和排版仍需在各平台发布前人工核对。工作台不会读取平台账号或替你点击发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button onClick={async () => { await copyText(item.content); const opened = window.open(item.editorUrl, '_blank'); if (opened) opened.opener = null; onNotice(`${platform.name} 正文已复制，请在官方编辑器检查后发布。`); }}><ExternalLink />复制正文并打开</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div>}</article>; })}</div></DialogContent></Dialog>
 
     <Dialog open={closureOpen} onOpenChange={setClosureOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>收尾入库预览</DialogTitle><DialogDescription>未审批前不会写入长期记忆。重复条目会自动跳过。</DialogDescription></DialogHeader>{closurePreview && <div className="blog-closure-preview"><pre>{closurePreview.summary}</pre>{closurePreview.entries.map((item) => <div key={`${item.category}-${item.value}`}><Badge variant="outline">{item.duplicate ? '重复·跳过' : '拟写入'}</Badge><span><strong>{item.category}</strong><small>{item.value}</small><small>{item.target}</small></span></div>)}</div>}<DialogFooter><Button variant="outline" onClick={() => setClosureOpen(false)}>返回修改</Button><Button onClick={commitClosure} disabled={busy === 'closure-save'}>{busy === 'closure-save' ? <Loader2 className="spin" /> : <Check />}审批并写入知识库</Button></DialogFooter></DialogContent></Dialog>
   </div>;

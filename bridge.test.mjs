@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, prepareCsdnPayload, preparePlatformPayload,
-  previewClosure, reviewCsdnDraft, sanitizeFileName, saveDraft, searchNotes, writingPreflight,
+  commitClosure, createBridge, createPublishPack, generateDraft, listDrafts, markdownToPlatformText,
+  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, reviewCsdnDraft,
+  sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
 
 test('protects a personal vault behind origin checks and pairing', async () => {
@@ -82,20 +83,39 @@ test('prepares Obsidian markdown for the official CSDN editor', () => {
   });
   assert.doesNotMatch(result.content, /^---/);
   assert.match(result.content, /^# 测试文章/);
-  assert.match(result.content, /正文来自 测试笔记/);
-  assert.match(result.content, /请在 CSDN 重新上传 Obsidian 附件：截图.png/);
+  assert.match(result.content, /正文来自 \[测试笔记\]\(30-领域\/测试.md\)/);
+  assert.match(result.content, /!\[截图\]\(截图.png\)/);
   assert.equal(result.warnings.length, 2);
   assert.equal(result.editorUrl, 'https://editor.csdn.net/md/');
 
-  const platforms = ['csdn', 'juejin', 'zhihu', 'wechat'].map(platform => preparePlatformPayload({
+  const platforms = ['csdn', 'juejin', 'zhihu', 'wechat', 'xiaohongshu'].map(platform => preparePlatformPayload({
     platform,
     title: '多平台文章',
     content: '# 多平台文章\n\n正文来自 [[知识笔记]]。',
   }));
-  assert.deepEqual(platforms.map(item => item.platform), ['csdn', 'juejin', 'zhihu', 'wechat']);
-  assert.equal(platforms.every(item => item.content.includes('正文来自 知识笔记')), true);
-  assert.match(platforms.find(item => item.platform === 'wechat').warnings.join('；'), /Markdown/);
+  assert.deepEqual(platforms.map(item => item.platform), ['csdn', 'juejin', 'zhihu', 'wechat', 'xiaohongshu']);
+  assert.match(platforms.find(item => item.platform === 'csdn').content, /正文来自 \[知识笔记\]\(知识笔记.md\)/);
+  assert.equal(platforms.filter(item => !['csdn', 'juejin'].includes(item.platform)).every(item => item.content.includes('正文来自 知识笔记')), true);
+  assert.match(platforms.find(item => item.platform === 'wechat').warnings.join('；'), /富文本/);
+  for (const marker of ['#', '*', '[', ']', '`']) assert.equal(platforms.find(item => item.platform === 'xiaohongshu').content.includes(marker), false);
+  assert.ok(platforms.find(item => item.platform === 'xiaohongshu').cardPages.length > 0);
   assert.throws(() => preparePlatformPayload({ platform: 'unknown', title: '标题', content: '正文' }), error => error.code === 'invalid_platform');
+});
+
+test('converts Obsidian syntax and creates plain-text image pages', () => {
+  const standard = obsidianToStandardMarkdown(`---\ntags: [test]\n---\n# 标题\n\n> [!NOTE] 核心\n> 这是提示\n\n[[30-领域/知识库|知识库]] 与 ==重点==。 %%内部备注%%\n\n![[附件/结构图.png|架构图]]\n\n段落 ^block-id`);
+  assert.doesNotMatch(standard, /tags:|\[\[|==|%%|\^block-id/);
+  assert.match(standard, /> \*\*备注：核心\*\*/);
+  assert.match(standard, /\[知识库\]\(30-领域\/知识库.md\)/);
+  assert.match(standard, /!\[架构图\]\(附件\/结构图.png\)/);
+  const plain = markdownToPlatformText(`${standard}\n\n- [x] 已完成\n1. 第一步\n\n[官网](https://example.com)`);
+  for (const marker of ['#', '*', '[', ']', '`']) assert.equal(plain.includes(marker), false);
+  assert.match(plain, /• 已完成/);
+  assert.match(plain, /1、第一步/);
+  assert.match(plain, /官网（https:\/\/example.com）/);
+  const pages = splitXiaohongshuCards('第一段内容很长，需要按照固定字符宽度自动换行。'.repeat(20), 4, 12);
+  assert.ok(pages.length > 1);
+  assert.ok(pages.every(page => page.split('\n').length <= 4));
 });
 
 test('saves a self-authored article with Obsidian metadata', async () => {
