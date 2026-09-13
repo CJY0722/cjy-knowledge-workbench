@@ -42,10 +42,13 @@ test('protects a personal vault behind origin checks and pairing', async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ origin: 'https://example.github.io', nonce }),
-      redirect: 'manual',
     });
-    assert.equal(approval.status, 303);
-    const approvalUrl = new URL(approval.headers.get('location'));
+    assert.equal(approval.status, 200);
+    const approvalHtml = await approval.text();
+    assert.match(approvalHtml, /连接成功/);
+    const encodedApprovalUrl = approvalHtml.match(/window\.location\.replace\(("[^"]+")\)/)?.[1];
+    assert.ok(encodedApprovalUrl);
+    const approvalUrl = new URL(JSON.parse(encodedApprovalUrl));
     assert.equal(approvalUrl.origin, 'https://example.github.io');
     assert.equal(approvalUrl.pathname, '/workbench/');
     const approvalParams = new URLSearchParams(approvalUrl.hash.replace(/^#/, ''));

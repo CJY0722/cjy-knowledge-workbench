@@ -54,12 +54,22 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 }
 
-function pairingPage({ origin, vaultName, nonce = '', token = '', error = '' }) {
+function returnUrlWithToken(target, token) {
+  const returnUrl = new URL(target);
+  const tab = returnUrl.hash.replace(/^#/, '') || 'overview';
+  returnUrl.hash = new URLSearchParams({ bridge_token: token, tab }).toString();
+  return returnUrl.href;
+}
+
+function pairingPage({ origin, vaultName, nonce = '', token = '', returnTarget = '', error = '' }) {
   const approved = Boolean(token);
+  const approvedTarget = approved && returnTarget ? returnUrlWithToken(returnTarget, token) : '';
   const action = error ? '' : approved
-    ? `<script>window.opener?.postMessage(${JSON.stringify({ type: 'cjy-workbench-paired', token })}, ${JSON.stringify(origin)}); window.close();</script>`
+    ? approvedTarget
+      ? `<a class="return" href="${escapeHtml(approvedTarget)}">返回工作台</a><script>window.location.replace(${JSON.stringify(approvedTarget)});</script>`
+      : `<script>window.opener?.postMessage(${JSON.stringify({ type: 'cjy-workbench-paired', token })}, ${JSON.stringify(origin)}); window.close();</script>`
     : `<form method="post" action="/pair"><input type="hidden" name="origin" value="${escapeHtml(origin)}"><input type="hidden" name="nonce" value="${escapeHtml(nonce)}"><button type="submit">允许连接</button></form>`;
-  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>连接 Obsidian</title><style>body{max-width:520px;margin:12vh auto;padding:24px;font:16px/1.7 system-ui;color:#20241f;background:#f7f8f5}main{padding:28px;border:1px solid #dfe2dc;border-radius:12px;background:white}code{word-break:break-all}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;color:white;background:#35624a;font-weight:700}</style><main><h1>${error || (approved ? '连接成功' : '连接自己的 Obsidian')}</h1><p>${approved ? '授权已发送到工作台，可以关闭此窗口。' : `知识库：<strong>${escapeHtml(vaultName)}</strong><br>请求来源：<code>${escapeHtml(origin)}</code>${error ? '' : '<br>允许后，该网页可以通过本机桥接读写此知识库。'}`}</p>${action}</main></html>`;
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>连接 Obsidian</title><style>body{max-width:520px;margin:12vh auto;padding:24px;font:16px/1.7 system-ui;color:#20241f;background:#f7f8f5}main{padding:28px;border:1px solid #dfe2dc;border-radius:12px;background:white}code{word-break:break-all}button,.return{display:block;width:100%;box-sizing:border-box;margin-top:18px;padding:12px;border:0;border-radius:8px;color:white;background:#35624a;font-weight:700;text-align:center;text-decoration:none}</style><main><h1>${error || (approved ? '连接成功' : '连接自己的 Obsidian')}</h1><p>${approved ? '正在返回工作台；如果没有自动返回，请点击下方按钮。' : `知识库：<strong>${escapeHtml(vaultName)}</strong><br>请求来源：<code>${escapeHtml(origin)}</code>${error ? '' : '<br>允许后，该网页可以通过本机桥接读写此知识库。'}`}</p>${action}</main></html>`;
 }
 
 export function sanitizeFileName(value) {
@@ -793,13 +803,6 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
       response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" });
       response.end(body);
     };
-    const redirectWithToken = (target, pairedToken) => {
-      const returnUrl = new URL(target);
-      const tab = returnUrl.hash.replace(/^#/, '') || 'overview';
-      returnUrl.hash = new URLSearchParams({ bridge_token: pairedToken, tab }).toString();
-      response.writeHead(303, { Location: returnUrl.href, 'Cache-Control': 'no-store' });
-      response.end();
-    };
     try {
       const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
       if (requestUrl.pathname === '/pair' && request.method === 'GET') {
@@ -821,7 +824,7 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
         if (!pairing || pairing.expires < Date.now() || pairing.origin !== requestedOrigin || !origins.has(requestedOrigin)) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '配对请求已失效' }));
         const pairedToken = randomBytes(24).toString('base64url');
         tokens.add(pairedToken);
-        if (pairing.returnTarget) return redirectWithToken(pairing.returnTarget, pairedToken);
+        if (pairing.returnTarget) return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), token: pairedToken, returnTarget: pairing.returnTarget }));
         return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), token: pairedToken }));
       }
       if (request.method === 'OPTIONS') {
