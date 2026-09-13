@@ -309,7 +309,6 @@ export function KnowledgeWorkbench() {
       const validTab = TAB_OPTIONS.some(([value]) => value === requestedTab) ? requestedTab : savedSettings.startTab;
       setTab(validTab);
       if (returnedToken) window.history.replaceState(null, '', `#${validTab}`);
-      else setTab(savedSettings.startTab);
       try {
         const saved = JSON.parse(localStorage.getItem('workbench-task-state-v2') || '[]');
         setDone(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === 'string') : []);
