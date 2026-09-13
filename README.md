@@ -55,6 +55,8 @@ npm run bridge -- --vault "D:\Notes\MyVault" --origin "https://USERNAME.github.i
 
 ## 博客流程
 
+完整说明见：[博客写作使用指南](docs/BLOG_GUIDE.md)。
+
 1. 选择“自己创作”“AI 从知识源写”或“修改已有文章”；也可以直接导入本地 Markdown。
 2. 输入标题和正文，或选择参考笔记，再完成五类知识预检。
 3. 确认重点后继续创作、生成或修改草稿；发送内容给 OpenAI 前会再次确认。

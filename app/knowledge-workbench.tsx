@@ -65,7 +65,7 @@ type WorkbenchSettings = {
   density: 'comfortable' | 'compact';
   autoRefresh: boolean;
 };
-type BridgeHealth = { vault_name?: string; vault_exists?: boolean; obsidian_configured?: boolean; error?: string };
+type BridgeHealth = { vault_name?: string; vault_exists?: boolean; obsidian_configured?: boolean; openai_configured?: boolean; error?: string };
 
 const BRIDGE = 'http://127.0.0.1:8766';
 const BRIDGE_TOKEN_KEY = 'workbench-bridge-token';
@@ -182,6 +182,7 @@ export function KnowledgeWorkbench() {
   const [snapshot, setSnapshot] = useState(fallbackSnapshot);
   const [pulse, setPulse] = useState(fallbackPulse);
   const [bridgeOnline, setBridgeOnline] = useState(false);
+  const [aiConfigured, setAiConfigured] = useState(false);
   const [bridgeToken, setBridgeToken] = useState('');
   const [vaultName, setVaultName] = useState('');
   const [connectionError, setConnectionError] = useState('尚未与本地桥接配对');
@@ -215,6 +216,7 @@ export function KnowledgeWorkbench() {
   const refreshBridge = async (token = bridgeToken) => {
     if (!token) {
       setBridgeOnline(false);
+      setAiConfigured(false);
       setConnectionError('尚未与本地桥接配对');
       return;
     }
@@ -232,9 +234,11 @@ export function KnowledgeWorkbench() {
       setSnapshot(await response.json());
       setVaultName(health.vault_name || 'Obsidian');
       setBridgeOnline(true);
+      setAiConfigured(Boolean(health.openai_configured));
       setConnectionError('');
     } catch (error) {
       setBridgeOnline(false);
+      setAiConfigured(false);
       setConnectionError(error instanceof Error ? error.message : '连接失败');
     } finally {
       setSyncing(false);
@@ -382,6 +386,7 @@ export function KnowledgeWorkbench() {
     sessionStorage.removeItem(BRIDGE_TOKEN_KEY);
     setBridgeToken('');
     setBridgeOnline(false);
+    setAiConfigured(false);
     setVaultName('');
     setConnectionError('已断开本地知识库');
     setSnapshot(fallbackSnapshot);
@@ -667,7 +672,7 @@ export function KnowledgeWorkbench() {
           </TabsContent>
 
           <TabsContent value="blog">
-            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} onBridgeState={setBridgeOnline} onNotice={setNotice} />
+            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} openAiConfigured={aiConfigured} onBridgeState={setBridgeOnline} onConnect={connectVault} onNotice={setNotice} />
           </TabsContent>
 
           <TabsContent value="pulse">

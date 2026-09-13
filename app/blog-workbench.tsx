@@ -34,6 +34,7 @@ type HumanizerStatus = 'pending' | 'checked' | 'skipped';
 type MaterialKind = 'markdown' | 'visual';
 
 const SESSION_KEY = 'cjy-blog-session-v1';
+const BLOG_GUIDE_URL = 'https://github.com/CJY0722/cjy-knowledge-workbench/blob/main/docs/BLOG_GUIDE.md';
 const PLATFORMS: Array<{ id: PlatformId; name: string }> = [
   { id: 'csdn', name: 'CSDN' },
   { id: 'juejin', name: '掘金' },
@@ -95,13 +96,17 @@ export function BlogWorkbench({
   bridge,
   bridgeToken,
   bridgeOnline,
+  openAiConfigured,
   onBridgeState,
+  onConnect,
   onNotice,
 }: {
   bridge: string;
   bridgeToken: string;
   bridgeOnline: boolean;
+  openAiConfigured: boolean;
   onBridgeState: (online: boolean) => void;
+  onConnect: () => void;
   onNotice: (message: string) => void;
 }) {
   const [mode, setMode] = useState<WritingMode>('manual');
@@ -130,6 +135,7 @@ export function BlogWorkbench({
   const [drafts, setDrafts] = useState<DraftNote[]>([]);
   const [busy, setBusy] = useState('');
   const [saveOpen, setSaveOpen] = useState(false);
+  const [aiConsentOpen, setAiConsentOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [closureOpen, setClosureOpen] = useState(false);
   const [closure, setClosure] = useState({ preference: '', style: '', requirement: '', pitfall: '' });
@@ -188,7 +194,6 @@ export function BlogWorkbench({
   const statusText = ['准备知识与材料', '生成或修改初稿', '审核并写入 Markdown', '等待定稿确认', '发布与收尾'][stage - 1];
   const materialReady = materialKind === 'markdown' || Boolean(visualVerified && visualEvidence.trim());
   const workflowReady = Boolean(retrieval && focusDecision !== 'pending' && materialReady);
-  const canGenerate = workflowReady && mode !== 'manual';
   const canFinalize = Boolean(workflowReady && draftPath && !dirty && review && !review.blockers.length && humanizer !== 'pending');
   const preview = useMemo(() => draft.trim() || '正文预览会显示在这里。', [draft]);
 
@@ -260,6 +265,7 @@ export function BlogWorkbench({
   };
 
   const runPreflight = async () => {
+    if (!bridgeOnline) return onNotice('请先连接本地 Obsidian；预检需要读取你的知识库。');
     setBusy('preflight');
     try {
       const result = await request<{ retrieval: RetrievalItem[] }>('writing_preflight', { topic: title || sourceQuery });
@@ -269,13 +275,21 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
+  const generationIssue = () => {
+    if (!bridgeOnline) return '请先连接本地 Obsidian。';
+    if (mode === 'ai' && !source) return '请先搜索并选择一篇知识源，再执行预检。';
+    if (mode === 'revise' && !draft.trim()) return '请先导入、打开或粘贴已有文章。';
+    if (!retrieval) return '请在选定材料后执行五类知识库预检。';
+    if (focusDecision === 'pending') return '请先确认文章重点，或明确跳过重点讨论。';
+    if (!materialReady) return '请填写视觉材料核验记录，并确认已经核对图像。';
+    return '';
+  };
+
   const generateDraft = async (useAi: boolean) => {
-    if (!canGenerate) return onNotice('请先完成知识库预检、重点确认和材料核验。');
-    if (mode === 'ai' && !source) return onNotice('完全 AI 写需要先选择一篇知识源。');
-    if (mode === 'revise' && !draft.trim()) return onNotice('请先粘贴你已有的文章。');
-    if (useAi && !window.confirm(mode === 'ai'
-      ? '将把所选知识源、写作要求，以及五类预检命中的协作元知识与博客索引摘要发送给 OpenAI，是否继续？'
-      : '将把当前文章、修改要求，以及五类预检命中的协作元知识与博客索引摘要发送给 OpenAI，是否继续？')) return;
+    const issue = generationIssue();
+    if (issue) return onNotice(issue);
+    if (useAi && !openAiConfigured) return onNotice('本地桥接尚未配置 OpenAI。请按使用指南配置后重启桥接。');
+    setAiConsentOpen(false);
     setBusy(useAi ? 'generate' : 'template');
     try {
       const result = mode === 'ai'
@@ -288,6 +302,12 @@ export function BlogWorkbench({
       onNotice(useAi ? '初稿已生成，尚未写入 Obsidian。' : '安全模板已创建，尚未写入 Obsidian。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '生成失败'); }
     finally { setBusy(''); }
+  };
+
+  const requestAiGeneration = () => {
+    const issue = generationIssue();
+    if (issue) return onNotice(issue);
+    setAiConsentOpen(true);
   };
 
   const reviewDraft = async () => {
@@ -406,6 +426,12 @@ export function BlogWorkbench({
       <div className="blog-stage-strip">{['知识与材料', '初稿', '审核写入', '定稿', '发布收尾'].map((label, index) => <span key={label} className={stage > index ? 'active' : ''}>{index + 1}<small>{label}</small></span>)}</div>
     </section>
 
+    <section className="plain-block blog-readiness">
+      <div><ShieldCheck /><span><strong>开始前检查</strong><small>{!bridgeOnline ? '先连接本地知识库，预检、生成、保存和发布物料才可使用。' : !openAiConfigured ? '知识库已连接；普通写作可用，AI 生成还需配置 OpenAI。' : '知识库与 AI 均已就绪。请先选择材料，再确认重点并执行预检。'}</small></span></div>
+      <div className="blog-readiness-status"><span data-ready={bridgeOnline}>Obsidian {bridgeOnline ? '已连接' : '未连接'}</span><span data-ready={openAiConfigured}>OpenAI {openAiConfigured ? '已配置' : '未配置'}</span></div>
+      <div className="blog-inline-actions">{!bridgeOnline && <Button onClick={onConnect}><ShieldCheck />连接 Obsidian</Button>}<a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">查看使用指南</a></div>
+    </section>
+
     <div className="blog-config-grid">
       <section className="plain-block blog-config-card">
         <div className="blog-card-title"><FilePenLine /><div><strong>写作设置</strong><span>先选路径，再进入初稿</span></div></div>
@@ -433,7 +459,7 @@ export function BlogWorkbench({
     <section className="plain-block blog-editor-card">
       <header>
         <div><strong>Markdown 初稿</strong><span>{draftPath ? dirty ? '有未保存修改' : `已写入 ${draftPath}` : '尚未写入文件'}</span></div>
-        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={() => generateDraft(true)} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
+        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
       </header>
       {drafts.length > 0 && <div className="blog-draft-list">{drafts.map((item) => <button key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path}</small></span><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></button>)}</div>}
       <label className="blog-title-field" htmlFor="blog-title">文章标题<Input id="blog-title" value={title} onChange={(event) => { setTitle(event.target.value); setRetrieval(null); invalidateOutcome(); }} maxLength={100} placeholder="输入文章标题" /></label>
@@ -451,6 +477,8 @@ export function BlogWorkbench({
     </div>
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
+
+    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 OpenAI 生成</DialogTitle><DialogDescription>{mode === 'ai' ? '将把所选知识源、写作要求和预检摘要发送给 OpenAI。' : '将把当前文章、修改要求和预检摘要发送给 OpenAI。'}不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={openAiConfigured}><strong>{openAiConfigured ? 'OpenAI 已配置，可以生成' : 'OpenAI 尚未配置'}</strong><span>{openAiConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请按照使用指南设置 OPENAI_API_KEY，然后重启本地桥接。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{openAiConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">打开配置指南</a>}</DialogFooter></DialogContent></Dialog>
 
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料中心</DialogTitle><DialogDescription>Obsidian 特有语法已在出站时转换；图片、代码和排版仍需在各平台发布前人工核对。工作台不会读取平台账号或替你点击发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button onClick={async () => { await copyText(item.content); const opened = window.open(item.editorUrl, '_blank'); if (opened) opened.opener = null; onNotice(`${platform.name} 正文已复制，请在官方编辑器检查后发布。`); }}><ExternalLink />复制正文并打开</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div>}</article>; })}</div></DialogContent></Dialog>
 
