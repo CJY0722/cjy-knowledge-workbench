@@ -310,6 +310,11 @@
 .blog-card-title strong, .blog-card-title span { display: block; }
 .blog-card-title strong { font-size: 15px; }.blog-card-title span { margin-top: 4px; color: var(--plain-muted); font-size: 13px; line-height: 1.5; }
 .blog-config-card > label, .blog-finish-card > label, .blog-publish-pack label, .blog-title-field, .blog-instruction-field { display: grid; gap: 7px; margin-top: 13px; color: #4d574f; font-size: 13px; font-weight: 600; }
+.blog-choice-field { display: grid; gap: 7px; margin: 13px 0 0; padding: 0; color: #4d574f; border: 0; font-size: 13px; font-weight: 600; }
+.blog-choice-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 7px; }
+.blog-choice-group button { min-height: 38px; padding: 0 10px; color: var(--plain-text); border: 1px solid var(--plain-line-strong); border-radius: 7px; background: var(--plain-surface); cursor: pointer; font: inherit; font-weight: 500; }
+.blog-choice-group button:hover { background: var(--plain-surface-soft); }
+.blog-choice-group button[aria-pressed="true"] { color: #fff; border-color: var(--plain-accent); background: var(--plain-accent); }
 .blog-workbench input, .blog-workbench textarea, .blog-workbench select { color: var(--plain-text); border: 1px solid var(--plain-line-strong); border-radius: 7px; background: #fff; font-size: 14px; }
 .blog-workbench select { min-height: 38px; padding: 0 10px; }
 .blog-workbench textarea { line-height: 1.7; }
