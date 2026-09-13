@@ -30,7 +30,8 @@ test('protects a personal vault behind origin checks and pairing', async () => {
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
 
-    const pairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://example.github.io')}`);
+    const returnTarget = 'https://example.github.io/workbench/#blog';
+    const pairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://example.github.io')}&return=${encodeURIComponent(returnTarget)}`);
     assert.equal(pairing.status, 200);
     const pairingHtml = await pairing.text();
     assert.match(pairingHtml, /允许连接/);
@@ -41,11 +42,15 @@ test('protects a personal vault behind origin checks and pairing', async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ origin: 'https://example.github.io', nonce }),
+      redirect: 'manual',
     });
-    assert.equal(approval.status, 200);
-    const approvalHtml = await approval.text();
-    assert.match(approvalHtml, /连接成功/);
-    const pairedToken = approvalHtml.match(/"token":"([^"]+)"/)?.[1];
+    assert.equal(approval.status, 303);
+    const approvalUrl = new URL(approval.headers.get('location'));
+    assert.equal(approvalUrl.origin, 'https://example.github.io');
+    assert.equal(approvalUrl.pathname, '/workbench/');
+    const approvalParams = new URLSearchParams(approvalUrl.hash.replace(/^#/, ''));
+    assert.equal(approvalParams.get('tab'), 'blog');
+    const pairedToken = approvalParams.get('bridge_token');
     assert.ok(pairedToken);
 
     const healthResponse = await fetch(`${url}/health`, { headers: { Origin: 'https://example.github.io', 'X-Workbench-Token': pairedToken } });

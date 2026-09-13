@@ -302,7 +302,13 @@ export function KnowledgeWorkbench() {
         setSettings(savedSettings);
       } catch { setSettings(DEFAULT_SETTINGS); }
       const hash = window.location.hash.replace('#', '');
-      if (TAB_OPTIONS.some(([value]) => value === hash)) setTab(hash);
+      const pairParams = new URLSearchParams(hash);
+      const returnedToken = pairParams.get('bridge_token') || '';
+      const returnedTab = pairParams.get('tab') || '';
+      const requestedTab = returnedToken ? returnedTab : hash;
+      const validTab = TAB_OPTIONS.some(([value]) => value === requestedTab) ? requestedTab : savedSettings.startTab;
+      setTab(validTab);
+      if (returnedToken) window.history.replaceState(null, '', `#${validTab}`);
       else setTab(savedSettings.startTab);
       try {
         const saved = JSON.parse(localStorage.getItem('workbench-task-state-v2') || '[]');
@@ -312,7 +318,11 @@ export function KnowledgeWorkbench() {
         const saved = JSON.parse(localStorage.getItem('workbench-pinned-notes') || '[]');
         setPinnedNotes(Array.isArray(saved) ? saved : []);
       } catch { setPinnedNotes([]); }
-      const savedToken = sessionStorage.getItem(BRIDGE_TOKEN_KEY) || '';
+      const savedToken = returnedToken || sessionStorage.getItem(BRIDGE_TOKEN_KEY) || '';
+      if (returnedToken) {
+        sessionStorage.setItem(BRIDGE_TOKEN_KEY, returnedToken);
+        setNotice('已授权连接本机 Obsidian，正在读取知识库。');
+      }
       setBridgeToken(savedToken);
       setNow(new Date());
       if (savedSettings.autoRefresh) {
@@ -365,8 +375,8 @@ export function KnowledgeWorkbench() {
   };
 
   const connectVault = () => {
-    const popup = window.open(`${BRIDGE}/pair?origin=${encodeURIComponent(window.location.origin)}`, 'cjy-workbench-pair', 'popup,width=540,height=560');
-    if (!popup) setConnectionError('浏览器阻止了配对窗口，请允许弹窗后重试');
+    const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}#${tab}`;
+    window.location.assign(`${BRIDGE}/pair?origin=${encodeURIComponent(window.location.origin)}&return=${encodeURIComponent(returnUrl)}`);
   };
 
   const disconnectVault = () => {

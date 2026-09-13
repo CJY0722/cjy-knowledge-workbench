@@ -793,13 +793,22 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
       response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" });
       response.end(body);
     };
+    const redirectWithToken = (target, pairedToken) => {
+      const returnUrl = new URL(target);
+      const tab = returnUrl.hash.replace(/^#/, '') || 'overview';
+      returnUrl.hash = new URLSearchParams({ bridge_token: pairedToken, tab }).toString();
+      response.writeHead(303, { Location: returnUrl.href, 'Cache-Control': 'no-store' });
+      response.end();
+    };
     try {
       const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
       if (requestUrl.pathname === '/pair' && request.method === 'GET') {
         const requestedOrigin = normalizeOrigin(requestUrl.searchParams.get('origin'));
         if (!origins.has(requestedOrigin)) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '来源未获允许' }));
+        const returnTarget = requestUrl.searchParams.get('return') || '';
+        if (returnTarget && normalizeOrigin(returnTarget) !== requestedOrigin) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '返回地址与请求来源不一致' }));
         const nonce = randomBytes(18).toString('base64url');
-        pairingNonces.set(nonce, { origin: requestedOrigin, expires: Date.now() + 5 * 60_000 });
+        pairingNonces.set(nonce, { origin: requestedOrigin, returnTarget, expires: Date.now() + 5 * 60_000 });
         for (const [key, value] of pairingNonces) if (value.expires < Date.now()) pairingNonces.delete(key);
         return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), nonce }));
       }
@@ -812,6 +821,7 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
         if (!pairing || pairing.expires < Date.now() || pairing.origin !== requestedOrigin || !origins.has(requestedOrigin)) return sendHtml(403, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), error: '配对请求已失效' }));
         const pairedToken = randomBytes(24).toString('base64url');
         tokens.add(pairedToken);
+        if (pairing.returnTarget) return redirectWithToken(pairing.returnTarget, pairedToken);
         return sendHtml(200, pairingPage({ origin: requestedOrigin, vaultName: path.basename(vault), token: pairedToken }));
       }
       if (request.method === 'OPTIONS') {
