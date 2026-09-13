@@ -573,9 +573,9 @@ function templateBody(title, sourcePath, sourceContent, instruction) {
   return `# ${title}\n\n> 写作要求：${instruction || '面向学生读者，保留来源，不虚构结果。'}\n\n## 先说结论\n\n待补充：用 2～3 句话说明这篇文章解决什么问题。\n\n## 背景与目标\n\n本文基于 [[${sourcePath.replace(/\.md$/i, '')}]] 整理。请在发布前核对原始资料。\n\n## 来源笔记要点\n\n${excerpt || '待补充：来源笔记暂无正文。'}\n\n## 实践步骤\n\n- 待补充：环境与前置条件\n- 待补充：核心操作\n- 待补充：验证方法\n\n## 常见问题\n\n待补充：只记录真实遇到或来源明确的问题。\n\n## 总结\n\n待补充：回顾结论，并给出可执行的下一步。`;
 }
 
-async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_KEY) {
+export async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_KEY, fetcher = fetch) {
   if (!key || key === 'YOUR_API_KEY_HERE') throw apiError('尚未配置 DeepSeek API Key', 'deepseek_not_configured');
-  const response = await fetch('https://api.deepseek.com/chat/completions', {
+  const response = await fetcher('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -585,7 +585,11 @@ async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_K
     })
   });
   const data = await response.json();
-  if (!response.ok) throw apiError(data?.error?.message || 'DeepSeek 生成失败', 'deepseek_failed');
+  if (!response.ok) {
+    const detail = String(data?.error?.message || '');
+    const invalidKey = response.status === 401 || /authentication fails|api key.*invalid/i.test(detail);
+    throw apiError(invalidKey ? 'DeepSeek API Key 无效或已失效，已从本机桥接清除；请在设置中填写新密钥。' : detail || 'DeepSeek 生成失败', invalidKey ? 'invalid_deepseek_key' : 'deepseek_failed');
+  }
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw apiError('DeepSeek 未返回正文', 'empty_generation');
   return text;
@@ -974,7 +978,10 @@ export function createBridge({ root = process.env.OBSIDIAN_VAULT, port = Number(
         return send(200, { ok: true, result: { configured: false } });
       }
       send(200, { ok: true, result: await route(data.action, data, vault, deepseekKey) });
-    } catch (error) { send(error.code === 'ENOENT' ? 404 : 400, { error: error.message, code: error.code || 'bad_request' }); }
+    } catch (error) {
+      if (error.code === 'invalid_deepseek_key') deepseekKey = '';
+      send(error.code === 'ENOENT' ? 404 : 400, { error: error.message, code: error.code || 'bad_request' });
+    }
   });
   return { server, port, vault };
 }

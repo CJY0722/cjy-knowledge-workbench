@@ -97,6 +97,7 @@ export function BlogWorkbench({
   bridgeToken,
   bridgeOnline,
   deepseekConfigured,
+  onDeepseekState,
   onBridgeState,
   onConnect,
   onConfigure,
@@ -106,6 +107,7 @@ export function BlogWorkbench({
   bridgeToken: string;
   bridgeOnline: boolean;
   deepseekConfigured: boolean;
+  onDeepseekState: (configured: boolean) => void;
   onBridgeState: (online: boolean) => void;
   onConnect: () => void;
   onConfigure: () => void;
@@ -158,6 +160,7 @@ export function BlogWorkbench({
       body: JSON.stringify({ action, ...payload }),
     });
     const data = await response.json() as { error?: string; code?: string; result?: T };
+    if (data.code === 'invalid_deepseek_key') onDeepseekState(false);
     if (!response.ok || data.error) {
       const error = new Error(data.error || '操作失败') as Error & { code?: string };
       error.code = data.code;

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createBridge, createPublishPack, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
+  commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
   obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, reviewCsdnDraft,
   sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
@@ -195,6 +195,17 @@ test('fixes blockers and humanizes a draft without losing frontmatter', async ()
   );
   assert.match(humanized.content, /^---[\s\S]*source: "\[\[来源\]\]"/);
   assert.equal(humanized.review.blockers.length, 0);
+});
+
+test('turns DeepSeek authentication failures into a safe actionable error', async () => {
+  await assert.rejects(
+    () => deepseekCompletion('system', 'user', 'sk-test-key-for-auth-failure', async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { message: 'Authentication Fails, Your api key is invalid' } }),
+    })),
+    error => error.code === 'invalid_deepseek_key' && /已从本机桥接清除/.test(error.message) && !/Authentication Fails/.test(error.message),
+  );
 });
 
 test('records preflight misses and writes approved closure with deduplication', async () => {

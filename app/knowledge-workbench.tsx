@@ -697,7 +697,7 @@ export function KnowledgeWorkbench() {
           </TabsContent>
 
           <TabsContent value="blog">
-            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} deepseekConfigured={deepseekConfigured} onBridgeState={setBridgeOnline} onConnect={connectVault} onConfigure={() => setSettingsOpen(true)} onNotice={setNotice} />
+            <BlogWorkbench bridge={BRIDGE} bridgeToken={bridgeToken} bridgeOnline={bridgeOnline} deepseekConfigured={deepseekConfigured} onDeepseekState={setDeepseekConfigured} onBridgeState={setBridgeOnline} onConnect={connectVault} onConfigure={() => setSettingsOpen(true)} onNotice={setNotice} />
           </TabsContent>
 
           <TabsContent value="pulse">
