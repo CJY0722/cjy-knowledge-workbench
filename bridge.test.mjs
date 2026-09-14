@@ -111,20 +111,24 @@ test('prepares Obsidian markdown for the official CSDN editor', () => {
   assert.match(platforms.find(item => item.platform === 'wechat').warnings.join('；'), /富文本/);
   for (const marker of ['#', '*', '[', ']', '`']) assert.equal(platforms.find(item => item.platform === 'xiaohongshu').content.includes(marker), false);
   assert.ok(platforms.find(item => item.platform === 'xiaohongshu').cardPages.length > 0);
+  assert.match(platforms.find(item => item.platform === 'xiaohongshu').conversions.join('；'), /纯文本.*图卡/);
+  assert.equal(Array.from(preparePlatformPayload({ platform: 'xiaohongshu', title: '这是一个超过二十个字符的小红书文章标题需要自动截取', content: '# 正文\n\n内容' }).title).length, 20);
   assert.throws(() => preparePlatformPayload({ platform: 'unknown', title: '标题', content: '正文' }), error => error.code === 'invalid_platform');
 });
 
 test('converts Obsidian syntax and creates plain-text image pages', () => {
-  const standard = obsidianToStandardMarkdown(`---\ntags: [test]\n---\n# 标题\n\n> [!NOTE] 核心\n> 这是提示\n\n[[30-领域/知识库|知识库]] 与 ==重点==。 %%内部备注%%\n\n![[附件/结构图.png|架构图]]\n\n段落 ^block-id`);
-  assert.doesNotMatch(standard, /tags:|\[\[|==|%%|\^block-id/);
+  const standard = obsidianToStandardMarkdown(`---\ntags: [test]\n---\n# 标题\n\n> [!NOTE] 核心\n> 这是提示\n\n[[30-领域/知识库|知识库]] 与 ==重点==。 %%内部备注%%\n\n![[附件/结构图.png|架构图]]\n\n\`\`\`dataview\nLIST FROM #项目\n\`\`\`\n\n段落 ^block-id`);
+  assert.doesNotMatch(standard, /tags:|\[\[|==|%%|\^block-id|LIST FROM/);
   assert.match(standard, /> \*\*备注：核心\*\*/);
   assert.match(standard, /\[知识库\]\(30-领域\/知识库.md\)/);
   assert.match(standard, /!\[架构图\]\(附件\/结构图.png\)/);
-  const plain = markdownToPlatformText(`${standard}\n\n- [x] 已完成\n1. 第一步\n\n[官网](https://example.com)`);
-  for (const marker of ['#', '*', '[', ']', '`']) assert.equal(plain.includes(marker), false);
+  const plain = markdownToPlatformText(`${standard}\n\n- [x] 已完成\n1. 第一步\n\n[官网](https://example.com)\n\n\`\`\`typescript\nconst render = <T>(value: T) => [value];\n\`\`\``);
+  const prose = plain.split('【代码】')[0];
+  for (const marker of ['#', '*', '[', ']', '`']) assert.equal(prose.includes(marker), false);
   assert.match(plain, /• 已完成/);
   assert.match(plain, /1、第一步/);
   assert.match(plain, /官网（https:\/\/example.com）/);
+  assert.match(plain, /const render = <T>\(value: T\) => \[value\];/);
   const pages = splitXiaohongshuCards('第一段内容很长，需要按照固定字符宽度自动换行。'.repeat(20), 4, 12);
   assert.ok(pages.length > 1);
   assert.ok(pages.every(page => page.split('\n').length <= 4));

@@ -431,6 +431,7 @@ export function obsidianToStandardMarkdown(value) {
   const source = withoutFrontmatter(String(value || '').replace(/\r\n?/g, '\n'));
   return source
     .replace(/%%[\s\S]*?%%/g, '')
+    .replace(/```(?:dataview|dataviewjs|query)[^\n]*\n[\s\S]*?```/gi, '> **需要手动补充：原 Obsidian 查询块已移除，请粘贴静态结果。**')
     .replace(/^>\s*\[!([a-z-]+)\][+-]?\s*(.*)$/gim, (_, kind, title) => {
       const label = CALLOUT_LABELS[String(kind).toLowerCase()] || String(kind).toUpperCase();
       return `> **${label}${title.trim() ? `：${title.trim()}` : ''}**`;
@@ -456,8 +457,12 @@ export function obsidianToStandardMarkdown(value) {
 }
 
 export function markdownToPlatformText(value) {
-  return String(value || '')
-    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) => `【代码】\n${code.trim()}\n【代码结束】`)
+  const code = [];
+  const protectedValue = String(value || '').replace(/```[^\n]*\n([\s\S]*?)```|`([^`\n]+)`/g, (_, block, inline) => {
+    code.push(block === undefined ? inline : `【代码】\n${block.trim()}\n【代码结束】`);
+    return `\uE000${code.length - 1}\uE001`;
+  });
+  return protectedValue
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^>\s?/gm, '')
     .replace(/^\s*[-*+]\s+\[[ xX]\]\s+/gm, '• ')
@@ -474,10 +479,10 @@ export function markdownToPlatformText(value) {
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/__([^_\n]+)__/g, '$1')
     .replace(/~~([^~\n]+)~~/g, '$1')
-    .replace(/`([^`\n]+)`/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
     .replace(/_([^_\n]+)_/g, '$1')
     .replace(/<[^>\n]+>/g, '')
+    .replace(/\uE000(\d+)\uE001/g, (_, index) => code[Number(index)])
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -509,6 +514,14 @@ export function preparePlatformPayload({ platform = 'csdn', title, content }) {
   if (source.length > 200000) throw apiError('草稿过长，请控制在 20 万字符以内', 'draft_too_large');
 
   const warnings = [];
+  const conversions = [];
+  if (/^---\s*\n[\s\S]*?\n---/.test(source)) conversions.push('YAML 已移除');
+  if (/!?\[\[[^\]]+\]\]/.test(source)) conversions.push('WikiLink / 嵌入已标准化');
+  if (/^>\s*\[![^\]]+\]/mi.test(source)) conversions.push('Callout 已转引用');
+  if (/==[^=\n]+==/.test(source)) conversions.push('高亮已转粗体');
+  if (/%%[\s\S]*?%%/.test(source)) conversions.push('Obsidian 注释已移除');
+  if (/\s+\^[a-z0-9-]+$/mi.test(source)) conversions.push('块标识已移除');
+  if (/```(?:dataview|dataviewjs|query)/i.test(source)) conversions.push('查询块已转静态占位');
   if (/!\[\[[^\]]+\]\]/.test(source)) warnings.push(`Obsidian 附件已转为标准引用，但仍需在 ${target.name} 重新上传`);
   if (/!\[[^\]]*\]\((?!https?:\/\/|data:)[^)]+\)/i.test(source)) warnings.push(`检测到本地 Markdown 图片，请在 ${target.name} 中重新上传`);
   if (/待补充|待确认|TODO/i.test(source)) warnings.push('正文仍包含待补充或待确认标记');
@@ -519,23 +532,31 @@ export function preparePlatformPayload({ platform = 'csdn', title, content }) {
   let prepared = markdown;
   if (target.kind === 'rich-text') {
     prepared = markdownToPlatformText(markdown);
+    conversions.push('Markdown 已转结构化粘贴稿');
     warnings.push(`${target.name} 已生成富文本兼容稿；粘贴后请检查图片、代码块、表格和标题层级`);
   }
   if (target.kind === 'plain-text') {
     prepared = markdownToPlatformText(markdown);
+    conversions.push('Markdown 已转纯文本');
     warnings.push('已移除标题、链接、强调等 Markdown 标记，适合作为小红书长文底稿');
   }
   const cardPages = platform === 'xiaohongshu' ? splitXiaohongshuCards(prepared) : undefined;
-  if (cardPages) warnings.push(`已按段落拆分为 ${cardPages.length} 张 3:4 图卡，请下载后逐张上传`);
+  if (cardPages) {
+    conversions.push('长文已分页为 3:4 图卡');
+    warnings.push(`已分页为 ${cardPages.length} 张 3:4 图卡，请下载后逐张上传`);
+  }
+  const preparedTitle = platform === 'xiaohongshu' ? Array.from(cleanTitle).slice(0, 20).join('') : cleanTitle;
+  if (preparedTitle !== cleanTitle) warnings.push('小红书标题已截取为前 20 个字符，请发布前确认语义完整');
   return {
     platform,
     platformName: target.name,
-    title: cleanTitle,
+    title: preparedTitle,
     content: `${prepared}\n`,
     characters: prepared.replace(/\s/g, '').length,
     warnings,
     editorUrl: target.editorUrl,
     format: target.format,
+    conversions,
     ...(cardPages ? { cardPages } : {}),
   };
 }
