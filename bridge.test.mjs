@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
   commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
-  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, reviewCsdnDraft,
+  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, reviewCsdnDraft,
   sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
 
@@ -77,6 +77,10 @@ test('protects a personal vault behind origin checks and pairing', async () => {
     const clearedHealth = await fetch(`${url}/health`, { headers: actionHeaders }).then(response => response.json());
     assert.equal(clearedHealth.deepseek_configured, false);
 
+    const auditResponse = await fetch(`${url}/action`, { method: 'POST', headers: actionHeaders, body: JSON.stringify({ action: 'publication_audit', title: '就绪文章', content: '---\ntitle: 就绪文章\ndescription: 已核对\ntags: [测试]\ncover: https://example.com/cover.png\nstatus: ready\nreviewed: true\n---\n\n# 就绪文章\n\n## 正文\n\n已核对。\n\n## 结论\n\n完成。' }) });
+    assert.equal(auditResponse.status, 200);
+    assert.equal((await auditResponse.json()).result.platforms.length, 5);
+
     const forbiddenPairing = await fetch(`${url}/pair?origin=${encodeURIComponent('https://evil.example')}`);
     assert.equal(forbiddenPairing.status, 403);
   } finally {
@@ -132,6 +136,70 @@ test('converts Obsidian syntax and creates plain-text image pages', () => {
   const pages = splitXiaohongshuCards('第一段内容很长，需要按照固定字符宽度自动换行。'.repeat(20), 4, 12);
   assert.ok(pages.length > 1);
   assert.ok(pages.every(page => page.split('\n').length <= 4));
+});
+
+test('builds a read-only content pipeline and publication audit', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-publishing-'));
+  const blogDir = path.join(root, '06-Content', 'CSDN');
+  const noteDir = path.join(root, '30-领域');
+  const assetDir = path.join(root, 'assets');
+  await mkdir(blogDir, { recursive: true });
+  await mkdir(noteDir, { recursive: true });
+  await mkdir(assetDir, { recursive: true });
+  await writeFile(path.join(noteDir, '已存在.md'), '---\ntags: [公开]\ncreated: 2026-09-14\nstatus: published\n---\n\n# 已存在', 'utf8');
+  await writeFile(path.join(noteDir, '私有冲突.md'), '---\nstatus: draft\ndg-publish: true\n---\n\n# 私有冲突', 'utf8');
+  await writeFile(path.join(assetDir, '存在.png'), 'image', 'utf8');
+  await writeFile(path.join(root, 'manual.pdf'), 'pdf', 'utf8');
+  await writeFile(path.join(root, 'relative-only.png'), 'image', 'utf8');
+  const article = `---
+title: "发布检查"
+description: >
+  检查元数据、链接与附件
+tags:
+  - CSDN
+  - 测试
+cover: https://example.com/cover.png
+status: review
+reviewed: true
+---
+
+# 发布检查
+
+## 链接
+
+[[30-领域/已存在]]、[[30-领域/私有冲突]]、[[缺失笔记]]、[[manual.pdf]]、![[assets/存在.png]]、![[assets/缺失.png]]。
+
+![相对图片](relative-only.png)
+
+## 结论
+
+TODO：发布前补全。`;
+  const articlePath = path.join(blogDir, '发布检查.md');
+  await writeFile(articlePath, article, 'utf8');
+  const before = await readFile(articlePath, 'utf8');
+  const beforeMtime = (await stat(articlePath)).mtimeMs;
+
+  const drafts = await listDrafts(root);
+  assert.equal(drafts[0].status, 'review');
+  assert.equal(drafts[0].reviewed, true);
+  assert.deepEqual(drafts[0].tags, ['CSDN', '测试']);
+  assert.equal(typeof drafts[0].qualityScore, 'number');
+  assert.ok(drafts[0].issueCount > 0);
+
+  const audit = await publicationAudit({ path: '06-Content/CSDN/发布检查.md', title: '发布检查', content: article }, root);
+  assert.equal(audit.ready, false);
+  assert.equal(audit.metadata.status, 'review');
+  assert.deepEqual(audit.links.broken, ['缺失笔记']);
+  assert.deepEqual(audit.links.unpublished, ['30-领域/私有冲突']);
+  assert.deepEqual(audit.assets.missing, ['assets/缺失.png', 'relative-only.png']);
+  assert.equal(audit.platforms.length, 5);
+  assert.match(audit.blockers.join('；'), /待补充或待确认|链接|附件/);
+  assert.equal(await readFile(articlePath, 'utf8'), before);
+  assert.equal((await stat(articlePath)).mtimeMs, beforeMtime);
+
+  const ready = await publicationAudit({ title: '可发布文章', content: '---\ntitle: 可发布文章\ndescription: 已核对\ntags:\n  - CSDN\ncover: https://example.com/cover.png\nstatus: ready\nreviewed: true\n---\n\n# 可发布文章\n\n## 正文\n\n内容已核对。\n\n## 结论\n\n完成。' }, root);
+  assert.equal(ready.ready, true);
+  await assert.rejects(() => publicationAudit({ path: '../越界.md', title: '越界', content: '# 越界' }, root), error => error.code === 'invalid_path');
 });
 
 test('saves a self-authored article with Obsidian metadata', async () => {

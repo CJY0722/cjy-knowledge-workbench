@@ -14,7 +14,9 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 
 type SourceNote = { path: string; title: string; preview?: string; score?: number; updated?: string };
-type DraftNote = { path: string; title: string; updated: string };
+type BlogStatus = 'idea' | 'draft' | 'review' | 'ready' | 'published';
+type DraftFilter = 'all' | BlogStatus;
+type DraftNote = { path: string; title: string; updated: string; status?: BlogStatus; reviewed?: boolean; tags?: string[]; characters?: number; qualityScore?: number; issueCount?: number };
 type RetrievalItem = { category: string; matches: Array<{ path: string; title: string; preview?: string; excerpt?: string }>; searchedAt: string };
 type ReviewResult = {
   blockers: string[];
@@ -27,6 +29,17 @@ type ReviewResult = {
 type PublishPack = { csdnIntro: string; xiaohongshuTitle: string; xiaohongshuIntro: string };
 type PlatformId = 'csdn' | 'juejin' | 'zhihu' | 'wechat' | 'xiaohongshu';
 type PreparedPlatform = { platform: PlatformId; platformName: string; title: string; content: string; characters: number; warnings: string[]; conversions: string[]; editorUrl: string; format: string; cardPages?: string[] };
+type PublicationReport = {
+  ready: boolean;
+  score: number;
+  metadata: { status: BlogStatus; title: boolean; summary: boolean; tags: string[]; cover: boolean; reviewed: boolean };
+  links: { total: number; resolved: number; broken: string[]; unpublished: string[]; backlinks: string[] };
+  assets: { total: number; existing: number; missing: string[] };
+  blockers: string[];
+  warnings: string[];
+  platforms: Array<{ platform: PlatformId; platformName: string; format: string; characters: number; warnings: string[]; conversions: string[]; ready: boolean }>;
+  related: Array<{ path: string; score: number; reason: string }>;
+};
 type XiaohongshuCard = { dataUrl: string; filename: string };
 type ClosurePreview = { summary: string; entries: Array<{ category: string; value: string; target: string; duplicate: boolean }>; event: string };
 type WritingMode = 'manual' | 'ai' | 'revise';
@@ -42,6 +55,33 @@ const PLATFORMS: Array<{ id: PlatformId; name: string }> = [
   { id: 'wechat', name: '微信公众号' },
   { id: 'xiaohongshu', name: '小红书' },
 ];
+const BLOG_STATUS_OPTIONS: Array<{ id: BlogStatus; label: string }> = [
+  { id: 'idea', label: '构思' },
+  { id: 'draft', label: '草稿' },
+  { id: 'review', label: '待审核' },
+  { id: 'ready', label: '可发布' },
+  { id: 'published', label: '已发布' },
+];
+const BLOG_STATUS_LABELS = Object.fromEntries(BLOG_STATUS_OPTIONS.map(item => [item.id, item.label])) as Record<BlogStatus, string>;
+
+function statusFromMarkdown(content: string): BlogStatus {
+  const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---/)?.[1] || '';
+  const raw = frontmatter.match(/^status:\s*["']?([^\n"']+)/m)?.[1]?.trim().toLowerCase() || 'draft';
+  if (/^(idea|planned|构思|选题)$/.test(raw)) return 'idea';
+  if (/^(review|reviewing|待审核|审核中)$/.test(raw)) return 'review';
+  if (/^(ready|scheduled|可发布|待发布)$/.test(raw)) return 'ready';
+  if (/^(published|已发布)$/.test(raw)) return 'published';
+  return 'draft';
+}
+
+function withDraftStatus(content: string, status: BlogStatus) {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return '';
+  const metadata = /^status:\s*.*$/mi.test(match[1])
+    ? match[1].replace(/^status:\s*.*$/mi, `status: ${status}`)
+    : `${match[1]}\nstatus: ${status}`;
+  return `---\n${metadata}\n---${content.slice(match[0].length)}`;
+}
 
 function renderXiaohongshuCard(page: string, title: string, index: number, total: number): XiaohongshuCard {
   const canvas = document.createElement('canvas');
@@ -137,6 +177,8 @@ export function BlogWorkbench({
   const [preparedPlatforms, setPreparedPlatforms] = useState<Partial<Record<PlatformId, PreparedPlatform>>>({});
   const [xiaohongshuCards, setXiaohongshuCards] = useState<XiaohongshuCard[]>([]);
   const [drafts, setDrafts] = useState<DraftNote[]>([]);
+  const [draftFilter, setDraftFilter] = useState<DraftFilter>('all');
+  const [publicationReport, setPublicationReport] = useState<PublicationReport | null>(null);
   const [busy, setBusy] = useState('');
   const [saveOpen, setSaveOpen] = useState(false);
   const [aiConsentOpen, setAiConsentOpen] = useState(false);
@@ -201,6 +243,9 @@ export function BlogWorkbench({
   const workflowReady = Boolean(retrieval && focusDecision !== 'pending' && materialReady);
   const canFinalize = Boolean(workflowReady && draftPath && !dirty && review && !review.blockers.length && humanizer !== 'pending');
   const preview = useMemo(() => draft.trim() || '正文预览会显示在这里。', [draft]);
+  const draftStatus = useMemo(() => statusFromMarkdown(draft), [draft]);
+  const draftCounts = useMemo(() => Object.fromEntries(BLOG_STATUS_OPTIONS.map(item => [item.id, drafts.filter(draftItem => (draftItem.status || 'draft') === item.id).length])) as Record<BlogStatus, number>, [drafts]);
+  const filteredDrafts = useMemo(() => draftFilter === 'all' ? drafts : drafts.filter(item => (item.status || 'draft') === draftFilter), [draftFilter, drafts]);
 
   const invalidateOutcome = () => {
     setReview(null);
@@ -210,6 +255,7 @@ export function BlogWorkbench({
     setPreparedPlatforms({});
     setXiaohongshuCards([]);
     setClosurePreview(null);
+    setPublicationReport(null);
   };
 
   const changeDraft = (value: string) => {
@@ -401,6 +447,24 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
+  const updateDraftStatus = (status: BlogStatus) => {
+    if (!draftPath) return onNotice('请先把文章写入 Obsidian，再设置内容管线状态。');
+    const next = withDraftStatus(draft, status);
+    if (!next) return onNotice('当前文章没有 YAML frontmatter，请先通过工作台保存一次。');
+    changeDraft(next);
+    onNotice(`已把“${BLOG_STATUS_LABELS[status]}”写入编辑区；审核并保存后才会更新 Obsidian。`);
+  };
+
+  const runPublicationAudit = async () => {
+    if (!title.trim() || !draft.trim()) return onNotice('请先准备文章标题和正文。');
+    setBusy('publication-audit');
+    try {
+      setPublicationReport(await request<PublicationReport>('publication_audit', { path: draftPath, title, content: draft }));
+      onNotice('发布就绪检查完成；它只读取当前文章和知识库，不会修改文件。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : '发布就绪检查失败'); }
+    finally { setBusy(''); }
+  };
+
   const finalize = () => {
     if (!canFinalize) return onNotice('请先保存最新版本、解决阻塞项，并完成或明确跳过去 AI 味检查。');
     if (!window.confirm('确认这篇文章已经定稿、不再修改？确认后才能生成发布文案和收尾预览。')) return;
@@ -492,11 +556,30 @@ export function BlogWorkbench({
         <div><strong>Markdown 初稿</strong><span>{draftPath ? dirty ? '有未保存修改' : `已写入 ${draftPath}` : '尚未写入文件'}</span></div>
         <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
       </header>
-      {drafts.length > 0 && <div className="blog-draft-list">{drafts.map((item) => <button key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path}</small></span><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></button>)}</div>}
+      {drafts.length > 0 && <><div className="blog-pipeline-toolbar"><div><strong>内容管线</strong><small>{drafts.length} 篇文章 · 按 Obsidian frontmatter 状态筛选</small></div><div className="blog-pipeline-filters"><button type="button" aria-pressed={draftFilter === 'all'} onClick={() => setDraftFilter('all')}>全部 {drafts.length}</button>{BLOG_STATUS_OPTIONS.map(item => <button type="button" key={item.id} aria-pressed={draftFilter === item.id} onClick={() => setDraftFilter(item.id)}>{item.label} {draftCounts[item.id]}</button>)}</div></div><div className="blog-draft-list">{filteredDrafts.length ? filteredDrafts.map((item) => <button type="button" aria-label={`打开文章：${item.title}`} key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path} · {(item.characters || 0).toLocaleString('zh-CN')} 字</small></span><span className="blog-draft-meta"><Badge variant="outline">{BLOG_STATUS_LABELS[item.status || 'draft']}</Badge><small>内容质量 {item.qualityScore ?? '—'} · {item.issueCount ?? '—'} 项提醒</small><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></span></button>) : <div className="blog-empty-row">当前状态下没有文章。</div>}</div></>}
       <label className="blog-title-field" htmlFor="blog-title">文章标题<Input id="blog-title" value={title} onChange={(event) => { setTitle(event.target.value); setRetrieval(null); invalidateOutcome(); }} maxLength={100} placeholder="输入文章标题" /></label>
       <label className="blog-instruction-field" htmlFor="blog-instruction">本次要求<Input id="blog-instruction" value={instruction} onChange={(event) => { setInstruction(event.target.value); setFinalized(false); setPublishPack(null); setPreparedPlatforms({}); }} /></label>
       <div className="blog-editor-grid"><Textarea value={draft} onChange={(event) => changeDraft(event.target.value)} rows={24} placeholder={mode === 'manual' ? '从这里开始写 Markdown…' : mode === 'revise' ? '粘贴或导入你已经写好的 Markdown…' : '完成预检并选择知识源后生成初稿…'} /><div className="blog-preview"><span>安全文本预览</span><pre>{preview}</pre></div></div>
       <footer><span>{draft ? `${draft.split(/\r?\n/).length} 行 · ${draft.replace(/\s/g, '').length.toLocaleString('zh-CN')} 字` : '0 行 · 0 字'}</span><div className="blog-inline-actions"><Button variant="outline" onClick={reviewDraft} disabled={Boolean(busy)}><ShieldCheck />审核检查</Button><Button onClick={openSaveDialog} disabled={Boolean(busy)}><Save />确认后写入</Button></div></footer>
+    </section>
+
+    <section className="plain-block blog-publication-card">
+      <header className="blog-publication-head">
+        <div className="blog-card-title"><BookCheck /><div><strong>发布就绪检查</strong><span>只读核对元数据、内部链接、附件、平台转换和相关文章</span></div></div>
+        <div className="blog-inline-actions"><label htmlFor="blog-status">内容状态<select id="blog-status" value={draftStatus} disabled={!draftPath} onChange={(event) => updateDraftStatus(event.target.value as BlogStatus)}>{BLOG_STATUS_OPTIONS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><Button variant="outline" onClick={runPublicationAudit} disabled={Boolean(busy) || !draft.trim()}>{busy === 'publication-audit' ? <Loader2 className="spin" /> : <ShieldCheck />}检查当前文章</Button></div>
+      </header>
+      <small className="blog-meta">状态修改只进入当前编辑区，仍需按原流程审核并确认保存；检查结果不会自动修改任何文件。</small>
+      {publicationReport ? <div className="blog-publication-report">
+        <div className="blog-audit-score" data-ready={publicationReport.ready}><strong>{publicationReport.score}</strong><span>{publicationReport.ready ? '已达到发布准备状态' : `${publicationReport.blockers.length} 个阻塞项 · ${publicationReport.warnings.length} 条提醒`}</span></div>
+        {(publicationReport.blockers.length > 0 || publicationReport.warnings.length > 0) && <div className="blog-audit-issues">{publicationReport.blockers.map(item => <small key={`block-${item}`} data-level="block">阻塞 · {item}</small>)}{publicationReport.warnings.map(item => <small key={`warn-${item}`}>提醒 · {item}</small>)}</div>}
+        <div className="blog-audit-grid">
+          <article><strong>发布元数据</strong><span>状态：{BLOG_STATUS_LABELS[publicationReport.metadata.status]}</span><span>标题 {publicationReport.metadata.title ? '✓' : '△'} · 摘要 {publicationReport.metadata.summary ? '✓' : '△'} · 标签 {publicationReport.metadata.tags.length || '△'} · 封面 {publicationReport.metadata.cover ? '✓' : '△'}</span></article>
+          <article><strong>内部链接</strong><span>{publicationReport.links.resolved}/{publicationReport.links.total} 可解析 · {publicationReport.links.backlinks.length} 条反向链接</span>{publicationReport.links.broken.length > 0 && <small>缺失：{publicationReport.links.broken.join('、')}</small>}{publicationReport.links.unpublished.length > 0 && <small>未公开：{publicationReport.links.unpublished.join('、')}</small>}</article>
+          <article><strong>附件清单</strong><span>{publicationReport.assets.existing}/{publicationReport.assets.total} 可读取</span>{publicationReport.assets.missing.length > 0 && <small>缺失：{publicationReport.assets.missing.join('、')}</small>}</article>
+        </div>
+        <div className="blog-platform-readiness">{publicationReport.platforms.map(item => <span key={item.platform} data-ready={item.ready}><strong>{item.platformName}</strong><small>{item.format} · {item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条平台提醒</small></span>)}</div>
+        {publicationReport.related.length > 0 && <div className="blog-related-notes"><strong>可补充引用的相关文章</strong>{publicationReport.related.map(item => <span key={item.path}>{item.path}<small>相关度 {item.score.toFixed(3)}</small></span>)}</div>}
+      </div> : <div className="blog-pending"><TriangleAlert />尚未执行发布就绪检查</div>}
     </section>
 
     <div className="blog-finish-grid">

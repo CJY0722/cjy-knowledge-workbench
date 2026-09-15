@@ -106,6 +106,70 @@ function withoutFrontmatter(content) {
   return content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '').trim();
 }
 
+function frontmatterEntry(content, key) {
+  const metadata = String(content || '').match(/^---\s*\n([\s\S]*?)\n---/)?.[1] || '';
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = metadata.split('\n');
+  const index = lines.findIndex(line => new RegExp(`^${escapedKey}:`, 'i').test(line));
+  if (index < 0) return { inline: '', block: [] };
+  const inline = lines[index].replace(new RegExp(`^${escapedKey}:\\s*`, 'i'), '').trim();
+  const block = [];
+  for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    if (line && !/^\s/.test(line)) break;
+    if (line.trim()) block.push(line.trim());
+  }
+  return { inline, block };
+}
+
+function frontmatterValue(content, key) {
+  const { inline, block } = frontmatterEntry(content, key);
+  if (['|', '>-', '>', '|-'].includes(inline)) return block.join(inline.startsWith('>') ? ' ' : '\n');
+  return (inline || block.join('\n')).replace(/^(["'])(.*)\1$/s, '$2');
+}
+
+function frontmatterBoolean(content, key) {
+  return /^(true|yes|1)$/i.test(frontmatterValue(content, key));
+}
+
+function frontmatterList(content, key) {
+  const { inline, block } = frontmatterEntry(content, key);
+  const raw = inline || block.join('\n');
+  if (!raw) return [];
+  const values = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1).split(',') : raw.split('\n').map(value => value.replace(/^-\s*/, ''));
+  return values.map(value => value.trim().replace(/^(["'])(.*)\1$/, '$2')).filter(Boolean);
+}
+
+function blogStatus(content) {
+  const raw = frontmatterValue(content, 'status').toLowerCase();
+  if (frontmatterBoolean(content, 'draft') || /^(draft|草稿)$/.test(raw)) return 'draft';
+  if (/^(idea|planned|构思|选题)$/.test(raw)) return 'idea';
+  if (/^(review|reviewing|待审核|审核中)$/.test(raw)) return 'review';
+  if (/^(published|已发布)$/.test(raw) || frontmatterBoolean(content, 'published') || /^(false|no|0)$/i.test(frontmatterValue(content, 'draft'))) return 'published';
+  if (/^(ready|scheduled|可发布|待发布)$/.test(raw) || frontmatterBoolean(content, 'publish') || frontmatterBoolean(content, 'share') || frontmatterBoolean(content, 'dg-publish')) return 'ready';
+  if (frontmatterBoolean(content, 'reviewed')) return 'review';
+  return 'draft';
+}
+
+function draftMetadata(content) {
+  const summary = frontmatterValue(content, 'description') || frontmatterValue(content, 'summary');
+  return {
+    status: blogStatus(content),
+    reviewed: frontmatterBoolean(content, 'reviewed'),
+    tags: frontmatterList(content, 'tags'),
+    summary,
+    cover: frontmatterValue(content, 'cover') || frontmatterValue(content, 'image'),
+  };
+}
+
+function draftReadiness(title, content) {
+  const review = reviewCsdnDraft({ title, content });
+  const metadata = draftMetadata(content);
+  const metadataIssues = [!metadata.tags.length && '缺少标签', !metadata.summary && '缺少摘要'].filter(Boolean);
+  const issueCount = review.blockers.length + review.warnings.length + metadataIssues.length;
+  return { metadata, review, metadataIssues, issueCount, qualityScore: Math.max(0, 100 - review.blockers.length * 18 - (review.warnings.length + metadataIssues.length) * 5) };
+}
+
 function displayWidth(value) {
   return Array.from(String(value)).reduce((width, char) => width + ((char.codePointAt(0) || 0) > 0xff ? 2 : 1), 0);
 }
@@ -722,7 +786,20 @@ export async function listDrafts(root = DEFAULT_VAULT) {
       const file = path.join(directory, entry.name);
       const content = await fs.readFile(file, 'utf8');
       const stat = await fs.stat(file);
-      items.push({ path: `06-Content/CSDN/${entry.name}`, title: titleFromMarkdown(content, path.basename(entry.name, '.md')), updated: stat.mtime.toISOString(), mtime: String(stat.mtimeMs) });
+      const title = titleFromMarkdown(content, path.basename(entry.name, '.md'));
+      const { metadata, issueCount, qualityScore } = draftReadiness(title, content);
+      items.push({
+        path: `06-Content/CSDN/${entry.name}`,
+        title,
+        updated: stat.mtime.toISOString(),
+        mtime: String(stat.mtimeMs),
+        status: metadata.status,
+        reviewed: metadata.reviewed,
+        tags: metadata.tags,
+        characters: withoutFrontmatter(content).replace(/\s/g, '').length,
+        qualityScore,
+        issueCount,
+      });
     }
     return items.sort((a, b) => b.updated.localeCompare(a.updated));
   } catch (error) {
@@ -808,13 +885,9 @@ async function graphView({ prefix = '', limit = 120 } = {}, root = DEFAULT_VAULT
   return { generatedAt: new Date().toISOString(), scope: prefix || '全部知识库', totalNodes: graph.nodes.length, ...graph };
 }
 
-async function noteConnections({ path: relativePath, limit = 6 }, root = DEFAULT_VAULT) {
-  const normalized = String(relativePath || '').replaceAll('\\', '/');
-  const targetFile = ensureInside(root, normalized);
-  const targetContent = await fs.readFile(targetFile, 'utf8');
+function connectionsFromRecords(records, normalized, targetContent, limit = 6) {
   const targetId = normalized.replace(/\.md$/i, '').toLowerCase();
   const targetBase = path.basename(normalized, '.md').toLowerCase();
-  const records = await vaultRecords(root);
   const outgoing = [...new Set([...targetContent.matchAll(/!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)].map(match => match[1].trim()))];
   const backlinks = records.filter(record => record.relative !== normalized && record.links.some(link => {
     const id = link.replace(/\.md$/i, '').replaceAll('\\', '/').toLowerCase();
@@ -827,6 +900,152 @@ async function noteConnections({ path: relativePath, limit = 6 }, root = DEFAULT
     return { path: record.relative, score: overlap / Math.max(1, Math.sqrt(words.size * sample.size)), reason: '正文关键词重合' };
   }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.min(20, Math.max(1, Number(limit) || 6)));
   return { note: normalized, outgoing, backlinks, related };
+}
+
+async function noteConnections({ path: relativePath, limit = 6 }, root = DEFAULT_VAULT) {
+  const normalized = String(relativePath || '').replaceAll('\\', '/');
+  const targetFile = ensureInside(root, normalized);
+  const targetContent = await fs.readFile(targetFile, 'utf8');
+  return connectionsFromRecords(await vaultRecords(root), normalized, targetContent, limit);
+}
+
+async function vaultFilePaths(root) {
+  const files = [];
+  async function visit(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && !IGNORED.has(entry.name)) await visit(path.join(directory, entry.name));
+      else if (entry.isFile()) files.push(path.relative(root, path.join(directory, entry.name)).split(path.sep).join('/'));
+    }
+  }
+  await visit(root);
+  return files;
+}
+
+function normalizeLocalReference(value) {
+  let target = String(value || '').trim().replace(/^<|>$/g, '').replace(/\s+["'][^"']*["']\s*$/, '');
+  if (!target || /^(?:https?:|data:|mailto:|#)/i.test(target)) return '';
+  target = target.split('#')[0].split('?')[0];
+  try { target = decodeURIComponent(target); } catch { /* retain the original path */ }
+  return path.posix.normalize(target.replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\//, ''));
+}
+
+export async function publicationAudit({ path: relativePath = '', title, content } = {}, root = DEFAULT_VAULT) {
+  const source = String(content || '').replace(/\r\n?/g, '\n');
+  if (source.length > 200000) throw apiError('草稿过长，请控制在 20 万字符以内', 'draft_too_large');
+  const normalizedPath = String(relativePath || '').replaceAll('\\', '/');
+  if (normalizedPath && (!normalizedPath.startsWith('06-Content/CSDN/') || !normalizedPath.toLowerCase().endsWith('.md'))) throw apiError('只能检查 CSDN 草稿目录', 'invalid_path');
+  const cleanTitle = String(title || '').trim() || titleFromMarkdown(source, '');
+  const { metadata, review, metadataIssues } = draftReadiness(cleanTitle, source);
+  const records = await vaultRecords(root);
+  const byId = new Map();
+  for (const record of records) {
+    byId.set(noteId(record.relative), record);
+    if (!byId.has(path.basename(noteId(record.relative)))) byId.set(path.basename(noteId(record.relative)), record);
+  }
+  const resolveNote = target => byId.get(noteId(target)) || byId.get(path.basename(noteId(target)));
+
+  const linkTargets = [];
+  const assetTargets = [];
+  for (const match of source.matchAll(/(!?)\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
+    const target = match[2].trim();
+    const extension = path.posix.extname(target).toLowerCase();
+    if (extension && extension !== '.md') assetTargets.push({ target: normalizeLocalReference(target), type: 'wiki', rooted: false });
+    else linkTargets.push(target);
+  }
+  for (const match of source.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+    const rawTarget = match[1].trim();
+    const target = normalizeLocalReference(rawTarget);
+    if (target) assetTargets.push({ target, type: 'markdown', rooted: /^<?\//.test(rawTarget) });
+  }
+  const coverTarget = normalizeLocalReference(metadata.cover);
+  if (coverTarget) assetTargets.push({ target: coverTarget, type: 'markdown', rooted: /^<?\//.test(metadata.cover) });
+  for (const match of source.matchAll(/(?<!!)\[[^\]]+\]\(([^)]+\.md(?:#[^)]+)?)\)/gi)) {
+    const target = normalizeLocalReference(match[1]);
+    if (target) linkTargets.push(target);
+  }
+
+  const uniqueLinks = [...new Set(linkTargets)];
+  const brokenLinks = [];
+  const unpublishedLinks = [];
+  for (const target of uniqueLinks) {
+    const record = resolveNote(target);
+    if (!record) {
+      brokenLinks.push(target);
+      continue;
+    }
+    const status = frontmatterValue(record.content, 'status').toLowerCase();
+    const explicitlyPrivate = /^(idea|draft|review|构思|草稿|待审核)$/.test(status)
+      || frontmatterBoolean(record.content, 'draft')
+      || ['publish', 'share', 'dg-publish'].some(key => /^(false|no|0)$/i.test(frontmatterValue(record.content, key)));
+    const explicitlyPublic = /^(published|已发布)$/.test(status)
+      || frontmatterBoolean(record.content, 'published')
+      || ['publish', 'share', 'dg-publish'].some(key => frontmatterBoolean(record.content, key))
+      || /^(false|no|0)$/i.test(frontmatterValue(record.content, 'draft'));
+    if (explicitlyPrivate || !explicitlyPublic) unpublishedLinks.push(target);
+  }
+
+  const uniqueAssets = [...new Map(assetTargets.filter(item => item.target).map(item => [`${item.type}:${item.rooted}:${item.target}`, item])).values()];
+  const allFiles = uniqueAssets.length ? await vaultFilePaths(root) : [];
+  const fileIds = new Set(allFiles.map(file => file.toLowerCase()));
+  const fileBasenames = new Set(allFiles.map(file => path.posix.basename(file).toLowerCase()));
+  const sourceDirectory = normalizedPath ? path.posix.dirname(normalizedPath) : '';
+  const missingAssets = uniqueAssets.filter(item => {
+    if (item.type === 'wiki') {
+      return !fileIds.has(item.target.toLowerCase())
+        && (item.target.includes('/') || !fileBasenames.has(path.posix.basename(item.target).toLowerCase()));
+    }
+    const candidate = item.rooted || !sourceDirectory ? item.target : path.posix.normalize(path.posix.join(sourceDirectory, item.target));
+    return candidate.startsWith('../') || !fileIds.has(candidate.toLowerCase());
+  }).map(item => item.target);
+
+  let connections = { backlinks: [], related: [] };
+  if (normalizedPath) {
+    connections = connectionsFromRecords(records, normalizedPath, source, 5);
+  }
+
+  const blockers = [...review.blockers];
+  const warnings = [...review.warnings, ...metadataIssues];
+  const statusLabel = { idea: '构思', draft: '草稿', review: '待审核', ready: '可发布', published: '已发布' }[metadata.status] || metadata.status;
+  if (!['ready', 'published'].includes(metadata.status)) blockers.push(`内容状态为“${statusLabel}”，尚未标记为可发布`);
+  if (brokenLinks.length) blockers.push(`存在 ${brokenLinks.length} 个无法解析的内部链接`);
+  if (missingAssets.length) blockers.push(`存在 ${missingAssets.length} 个缺失附件`);
+  if (unpublishedLinks.length) blockers.push(`有 ${unpublishedLinks.length} 个内部链接尚未明确公开`);
+  if (!metadata.reviewed) warnings.push('frontmatter 尚未标记 reviewed: true');
+  if (!metadata.cover) warnings.push('缺少封面字段，图文平台需要发布前补图');
+  if (/```(?:dataview|dataviewjs|query)/i.test(source)) warnings.push('仍包含 Obsidian 查询块，出站时只能降级为静态占位');
+  const uniqueBlockers = [...new Set(blockers)];
+  const uniqueWarnings = [...new Set(warnings)];
+  const score = Math.max(0, 100 - uniqueBlockers.length * 18 - uniqueWarnings.length * 5);
+  const platforms = Object.keys(PUBLISH_PLATFORMS).map(platform => {
+    const prepared = preparePlatformPayload({ platform, title: cleanTitle, content: source });
+    return {
+      platform: prepared.platform,
+      platformName: prepared.platformName,
+      format: prepared.format,
+      characters: prepared.characters,
+      warnings: prepared.warnings,
+      conversions: prepared.conversions,
+      ready: uniqueBlockers.length === 0,
+    };
+  });
+  return {
+    ready: uniqueBlockers.length === 0,
+    score,
+    metadata: {
+      status: metadata.status,
+      title: Boolean(frontmatterValue(source, 'title')),
+      summary: Boolean(metadata.summary),
+      tags: metadata.tags,
+      cover: Boolean(metadata.cover),
+      reviewed: metadata.reviewed,
+    },
+    links: { total: uniqueLinks.length, resolved: uniqueLinks.length - brokenLinks.length, broken: brokenLinks, unpublished: unpublishedLinks, backlinks: connections.backlinks },
+    assets: { total: uniqueAssets.length, existing: uniqueAssets.length - missingAssets.length, missing: missingAssets },
+    blockers: uniqueBlockers,
+    warnings: uniqueWarnings,
+    platforms,
+    related: connections.related,
+  };
 }
 
 async function askVault({ question, limit = 8 }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
@@ -909,6 +1128,7 @@ async function route(action, data, root, apiKey) {
   if (action === 'save_csdn') return saveDraft(data, root);
   if (action === 'prepare_csdn') return prepareCsdnPayload(data);
   if (action === 'prepare_platform') return preparePlatformPayload(data);
+  if (action === 'publication_audit') return publicationAudit(data, root);
   if (action === 'publish_pack') return createPublishPack(data);
   if (action === 'closure_preview') return previewClosure(data, root);
   if (action === 'commit_closure') return commitClosure(data, root);
