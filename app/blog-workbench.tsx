@@ -374,26 +374,27 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
-  const improveDraft = async (kind: 'fix' | 'humanize') => {
+  const improveDraft = async (kind: 'fix' | 'humanize', requestedIssues?: string[]) => {
     if (!bridgeOnline) return onNotice('请先连接本地 Obsidian。');
     if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
     if (!title.trim() || !draft.trim()) return onNotice('标题和正文不能为空。');
     if (!workflowReady) return onNotice('请先完成知识库预检、重点确认和材料核验。');
-    if (kind === 'fix' && !review) return onNotice('请先点击“审核检查”。');
-    if (kind === 'fix' && !review?.blockers.length) return onNotice('当前没有需要修正的阻塞项。');
+    if (kind === 'fix' && !review && !requestedIssues) return onNotice('请先点击“审核检查”。');
+    const issues = requestedIssues || (kind === 'fix' ? review?.blockers || [] : review?.warnings || []);
+    if (kind === 'fix' && !issues.length) return onNotice('当前没有需要修正的阻塞项。');
     setBusy(kind);
     try {
       const result = await request<{ content: string; review: ReviewResult }>('improve_csdn', {
         title,
         content: draft,
         kind,
-        issues: kind === 'fix' ? review?.blockers || [] : review?.warnings || [],
+        issues,
       });
       setDraft(result.content);
       invalidateOutcome();
       setReview(result.review);
       onNotice(kind === 'fix'
-        ? `阻塞修正完成，复检后剩余 ${result.review.blockers.length} 个阻塞项。`
+        ? `正文阻塞修正完成，草稿复检后剩余 ${result.review.blockers.length} 项；请重新执行发布检查。`
         : 'DeepSeek 去 AI 味完成，请复核全文并确认人工表达检查。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '草稿改写失败'); }
     finally { setBusy(''); }
@@ -572,6 +573,7 @@ export function BlogWorkbench({
       {publicationReport ? <div className="blog-publication-report">
         <div className="blog-audit-score" data-ready={publicationReport.ready}><strong>{publicationReport.score}</strong><span>{publicationReport.ready ? '已达到发布准备状态' : `${publicationReport.blockers.length} 个阻塞项 · ${publicationReport.warnings.length} 条提醒`}</span></div>
         {(publicationReport.blockers.length > 0 || publicationReport.warnings.length > 0) && <div className="blog-audit-issues">{publicationReport.blockers.map(item => <small key={`block-${item}`} data-level="block">阻塞 · {item}</small>)}{publicationReport.warnings.map(item => <small key={`warn-${item}`}>提醒 · {item}</small>)}</div>}
+        {publicationReport.blockers.length > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void improveDraft('fix', publicationReport.blockers)} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}修复可自动阻塞</Button><small className="blog-meta">DeepSeek 处理正文结构、占位和图示；链接、附件与公开状态需人工处理。</small></div>}
         <div className="blog-audit-grid">
           <article><strong>发布元数据</strong><span>状态：{BLOG_STATUS_LABELS[publicationReport.metadata.status]}</span><span>标题 {publicationReport.metadata.title ? '✓' : '△'} · 摘要 {publicationReport.metadata.summary ? '✓' : '△'} · 标签 {publicationReport.metadata.tags.length || '△'} · 封面 {publicationReport.metadata.cover ? '✓' : '△'}</span></article>
           <article><strong>内部链接</strong><span>{publicationReport.links.resolved}/{publicationReport.links.total} 可解析 · {publicationReport.links.backlinks.length} 条反向链接</span>{publicationReport.links.broken.length > 0 && <small>缺失：{publicationReport.links.broken.join('、')}</small>}{publicationReport.links.unpublished.length > 0 && <small>未公开：{publicationReport.links.unpublished.join('、')}</small>}</article>
