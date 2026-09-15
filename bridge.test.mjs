@@ -194,11 +194,14 @@ TODO：发布前补全。`;
   assert.deepEqual(audit.assets.missing, ['assets/缺失.png', 'relative-only.png']);
   assert.equal(audit.platforms.length, 5);
   assert.match(audit.blockers.join('；'), /待补充或待确认|链接|附件/);
+  assert.match(audit.fixableBlockers.join('；'), /待补充或待确认/);
+  assert.doesNotMatch(audit.fixableBlockers.join('；'), /链接|附件|内容状态/);
   assert.equal(await readFile(articlePath, 'utf8'), before);
   assert.equal((await stat(articlePath)).mtimeMs, beforeMtime);
 
   const ready = await publicationAudit({ title: '可发布文章', content: '---\ntitle: 可发布文章\ndescription: 已核对\ntags:\n  - CSDN\ncover: https://example.com/cover.png\nstatus: ready\nreviewed: true\n---\n\n# 可发布文章\n\n## 正文\n\n内容已核对。\n\n## 结论\n\n完成。' }, root);
   assert.equal(ready.ready, true);
+  assert.deepEqual(ready.fixableBlockers, []);
   await assert.rejects(() => publicationAudit({ path: '../越界.md', title: '越界', content: '# 越界' }, root), error => error.code === 'invalid_path');
 });
 

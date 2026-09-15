@@ -1042,6 +1042,7 @@ export async function publicationAudit({ path: relativePath = '', title, content
     links: { total: uniqueLinks.length, resolved: uniqueLinks.length - brokenLinks.length, broken: brokenLinks, unpublished: unpublishedLinks, backlinks: connections.backlinks },
     assets: { total: uniqueAssets.length, existing: uniqueAssets.length - missingAssets.length, missing: missingAssets },
     blockers: uniqueBlockers,
+    fixableBlockers: [...new Set(review.blockers)],
     warnings: uniqueWarnings,
     platforms,
     related: connections.related,
