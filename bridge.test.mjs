@@ -110,6 +110,7 @@ test('prepares Obsidian markdown for the official CSDN editor', () => {
     content: '# 多平台文章\n\n正文来自 [[知识笔记]]。',
   }));
   assert.deepEqual(platforms.map(item => item.platform), ['csdn', 'juejin', 'zhihu', 'wechat', 'xiaohongshu']);
+  assert.deepEqual(platforms.map(item => new URL(item.editorUrl).hostname), ['editor.csdn.net', 'juejin.cn', 'zhuanlan.zhihu.com', 'mp.weixin.qq.com', 'creator.xiaohongshu.com']);
   assert.match(platforms.find(item => item.platform === 'csdn').content, /正文来自 \[知识笔记\]\(知识笔记.md\)/);
   assert.equal(platforms.filter(item => !['csdn', 'juejin'].includes(item.platform)).every(item => item.content.includes('正文来自 知识笔记')), true);
   assert.match(platforms.find(item => item.platform === 'wechat').warnings.join('；'), /富文本/);
