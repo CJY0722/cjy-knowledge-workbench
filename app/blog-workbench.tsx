@@ -401,12 +401,22 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
-  const repairPublicationBlockers = () => {
-    const fixableBlockers = publicationReport?.fixableBlockers || [];
-    if (!fixableBlockers.length) {
-      return onNotice('当前阻塞项需要人工处理：将内容状态改为“可发布”，并处理未公开链接或缺失附件。');
-    }
-    return improveDraft('fix', fixableBlockers);
+  const repairPublicationBlockers = async () => {
+    if (!bridgeOnline) return onNotice('请先连接本地 Obsidian。');
+    if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
+    if (!publicationReport || !title.trim() || !draft.trim()) return onNotice('请先执行发布就绪检查。');
+    setBusy('fix');
+    try {
+      const result = await request<{ content: string; review: ReviewResult; publicationReport: PublicationReport; convertedLinks: number; statusAdjusted: boolean }>('repair_publication', { path: draftPath, title, content: draft });
+      setDraft(result.content);
+      invalidateOutcome();
+      setReview(result.review);
+      setPublicationReport(result.publicationReport);
+      onNotice(result.publicationReport.blockers.length
+        ? `AI 自动修复并复检完成，仍有 ${result.publicationReport.blockers.length} 个无法安全自动解决的阻塞项。`
+        : 'AI 自动修复并复检完成，当前没有发布阻塞项；请审核后确认保存。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : 'AI 自动修复失败'); }
+    finally { setBusy(''); }
   };
 
   const openSaveDialog = () => {
@@ -582,7 +592,7 @@ export function BlogWorkbench({
       {publicationReport ? <div className="blog-publication-report">
         <div className="blog-audit-score" data-ready={publicationReport.ready}><strong>{publicationReport.score}</strong><span>{publicationReport.ready ? '已达到发布准备状态' : `${publicationReport.blockers.length} 个阻塞项 · ${publicationReport.warnings.length} 条提醒`}</span></div>
         {(publicationReport.blockers.length > 0 || publicationReport.warnings.length > 0) && <div className="blog-audit-issues">{publicationReport.blockers.map(item => <small key={`block-${item}`} data-level="block">阻塞 · {item}</small>)}{publicationReport.warnings.map(item => <small key={`warn-${item}`}>提醒 · {item}</small>)}</div>}
-        {publicationReport.blockers.length > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void repairPublicationBlockers()} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}{publicationReport.fixableBlockers?.length ? '修复可自动阻塞' : '查看人工修复步骤'}</Button><small className="blog-meta">DeepSeek 处理正文结构、占位和图示；链接、附件与公开状态需人工处理。</small></div>}
+        {publicationReport.blockers.length > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void repairPublicationBlockers()} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}AI 自动修复</Button><small className="blog-meta">私有链接与附件路径会先在本机隐藏；AI 返回后自动恢复附件、转换不可发布链接并复检。</small></div>}
         <div className="blog-audit-grid">
           <article><strong>发布元数据</strong><span>状态：{BLOG_STATUS_LABELS[publicationReport.metadata.status]}</span><span>标题 {publicationReport.metadata.title ? '✓' : '△'} · 摘要 {publicationReport.metadata.summary ? '✓' : '△'} · 标签 {publicationReport.metadata.tags.length || '△'} · 封面 {publicationReport.metadata.cover ? '✓' : '△'}</span></article>
           <article><strong>内部链接</strong><span>{publicationReport.links.resolved}/{publicationReport.links.total} 可解析 · {publicationReport.links.backlinks.length} 条反向链接</span>{publicationReport.links.broken.length > 0 && <small>缺失：{publicationReport.links.broken.join('、')}</small>}{publicationReport.links.unpublished.length > 0 && <small>未公开：{publicationReport.links.unpublished.join('、')}</small>}</article>

@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
-  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, reviewCsdnDraft,
+  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, repairPublicationDraft, reviewCsdnDraft,
   sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
 
@@ -213,6 +213,63 @@ test('saves a self-authored article with Obsidian metadata', async () => {
   assert.match(saved, /source: "用户原创"/);
   assert.match(saved, /source_type: original/);
   assert.match(saved, /ai_generated: false/);
+});
+
+test('repairs publication blockers without exposing protected references to DeepSeek', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-auto-repair-'));
+  const blogDir = path.join(root, '06-Content', 'CSDN');
+  const privateDir = path.join(root, '20-项目');
+  await mkdir(blogDir, { recursive: true });
+  await mkdir(privateDir, { recursive: true });
+  const privatePath = path.join(privateDir, '私有发布源.md');
+  await writeFile(privatePath, '---\nstatus: draft\n---\n\nTOP_SECRET_SENTINEL', 'utf8');
+  const article = `---
+title: "自动修复测试"
+tags: [CSDN]
+status: draft
+reviewed: false
+---
+
+# 自动修复测试
+
+## 内容
+
+TODO：补全正文。参考 [[20-项目/私有发布源]] 和 [[缺失笔记]]。
+
+![[assets/missing.png]]
+
+## 结论
+
+完成。`;
+  const articlePath = path.join(blogDir, '自动修复测试.md');
+  await writeFile(articlePath, article, 'utf8');
+  const articleBefore = await readFile(articlePath, 'utf8');
+  const privateBefore = await readFile(privatePath, 'utf8');
+
+  const result = await repairPublicationDraft(
+    { path: '06-Content/CSDN/自动修复测试.md', title: '自动修复测试', content: article },
+    root,
+    'test-key',
+    async (system, user) => {
+      assert.match(system, /保护标记必须原样保留/);
+      assert.doesNotMatch(user, /私有发布源|缺失笔记|missing\.png|TOP_SECRET_SENTINEL/);
+      const tokens = [...new Set(user.match(/CJYPROTECTEDREFX*\d+TOKEN/g) || [])];
+      assert.equal(tokens.length, 3);
+      return `# 自动修复测试\n\n## 内容\n\n内容已核对。\n\n${tokens.join('\n\n')}\n\n## 结论\n\n完成。`;
+    },
+  );
+
+  assert.match(result.content, /status: ready/);
+  assert.doesNotMatch(result.content, /\[\[(?:20-项目\/私有发布源|缺失笔记)\]\]/);
+  assert.match(result.content, /私有发布源/);
+  assert.match(result.content, /缺失笔记/);
+  assert.match(result.content, /!\[\[assets\/missing\.png\]\]/);
+  assert.deepEqual(result.publicationReport.links.broken, []);
+  assert.deepEqual(result.publicationReport.links.unpublished, []);
+  assert.deepEqual(result.publicationReport.assets.missing, ['assets/missing.png']);
+  assert.match(result.publicationReport.blockers.join('；'), /缺失附件/);
+  assert.equal(await readFile(articlePath, 'utf8'), articleBefore);
+  assert.equal(await readFile(privatePath, 'utf8'), privateBefore);
 });
 
 test('searches a source, generates a safe template, and versions saves', async () => {

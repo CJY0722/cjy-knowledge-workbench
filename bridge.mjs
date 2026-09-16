@@ -718,7 +718,7 @@ export async function improveDraft({ title, content, kind, issues = [] }, apiKey
   const metadata = source.match(/^---\s*\n[\s\S]*?\n---/)?.[0] || '';
   const body = withoutFrontmatter(source);
   const system = kind === 'fix'
-    ? '你是严谨的中文技术编辑。只修正列出的审核问题，保留原文事实、结构意图、代码、链接和技术术语。不得虚构运行结果、数据、来源或个人经历。遇到资料不足的占位内容，应删除无法支持的主张或改成明确的资料边界，不得编造答案。ASCII 图示每行不超过 60 个半角显示列。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。'
+    ? '你是严谨的中文技术编辑。只修正列出的审核问题，保留原文事实、结构意图、代码、链接和技术术语。不得虚构运行结果、数据、来源或个人经历。遇到资料不足的占位内容，应删除无法支持的主张或改成明确的资料边界，不得编造答案。形如 CJYPROTECTEDREF0TOKEN 的保护标记必须原样保留且只能出现一次。ASCII 图示每行不超过 60 个半角显示列。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。'
     : '你是克制的中文技术编辑。让文章像真实作者写作：删除套话、机械过渡、重复总结和夸张措辞，调整长短句与段落节奏；保留全部事实、代码、链接、标题层级、技术术语和作者观点，不新增经验、结论或数据。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。';
   const problemList = Array.isArray(issues) && issues.length ? issues.map(item => `- ${String(item)}`).join('\n') : '- 无指定问题，按任务目标检查全文';
   const rewritten = withoutFrontmatter(await complete(system, `文章标题：${String(title || '')}\n\n需要处理的问题：\n${problemList}\n\n当前 Markdown：\n${body.slice(0, 30000)}`, apiKey));
@@ -1049,6 +1049,83 @@ export async function publicationAudit({ path: relativePath = '', title, content
   };
 }
 
+function withPublicationStatus(content, status = 'ready') {
+  const source = String(content || '');
+  const match = source.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return source;
+  const metadata = /^status:\s*.*$/mi.test(match[1])
+    ? match[1].replace(/^status:\s*.*$/mi, `status: ${status}`)
+    : `${match[1]}\nstatus: ${status}`;
+  return `---\n${metadata}\n---${source.slice(match[0].length)}`;
+}
+
+function protectPublicationReferences(content, report) {
+  let prefix = 'CJYPROTECTEDREF';
+  while (String(content).includes(prefix)) prefix += 'X';
+  const blocked = new Set([...report.links.broken, ...report.links.unpublished].map(noteId));
+  const replacements = [];
+  let convertedLinks = 0;
+  const protect = replacement => {
+    const token = `${prefix}${replacements.length}TOKEN`;
+    replacements.push({ token, replacement });
+    return token;
+  };
+  const wikiProtected = String(content).replace(/(!?)\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]/g, (whole, embed, rawTarget, rawAlias) => {
+    const target = String(rawTarget).trim();
+    if (!embed && blocked.has(noteId(target))) {
+      convertedLinks += 1;
+      return protect(String(rawAlias || path.posix.basename(target).replace(/\.md$/i, '')).trim());
+    }
+    return protect(whole);
+  });
+  const markdownProtected = wikiProtected.replace(/(!?)\[([^\]]*)\]\(([^)]+)\)/g, (whole, embed, label, rawTarget) => {
+    const target = normalizeLocalReference(rawTarget);
+    if (!embed && target && blocked.has(noteId(target))) {
+      convertedLinks += 1;
+      return protect(String(label).trim());
+    }
+    return protect(whole);
+  });
+  return {
+    content: markdownProtected,
+    convertedLinks,
+    restore(value) {
+      let restored = String(value);
+      for (const { token, replacement } of replacements) {
+        if (restored.split(token).length !== 2) throw apiError('AI 未能安全保留受保护的链接或附件，改写结果未应用', 'unsafe_ai_rewrite');
+        restored = restored.replace(token, replacement);
+      }
+      return restored;
+    },
+  };
+}
+
+export async function repairPublicationDraft({ path: relativePath = '', title, content } = {}, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
+  const source = String(content || '').replace(/\r\n?/g, '\n').trim();
+  if (!source) throw apiError('正文不能为空', 'empty_draft');
+  const before = await publicationAudit({ path: relativePath, title, content: source }, root);
+  if (!before.blockers.length) return { content: source, review: reviewCsdnDraft({ title, content: source }), publicationReport: before, convertedLinks: 0, statusAdjusted: false };
+  const statusAdjusted = Boolean(relativePath && !['ready', 'published'].includes(before.metadata.status));
+  const statusReady = statusAdjusted ? withPublicationStatus(source) : source;
+  const protectedDraft = protectPublicationReferences(statusReady, before);
+  const issues = [
+    ...before.fixableBlockers,
+    protectedDraft.convertedLinks && '本机已把不可发布的内部链接转换为受保护标记；只修正上下文衔接，不得改动保护标记',
+    before.assets.missing.length && '缺失附件已由本机隐藏为受保护标记；不得删除、移动或改动保护标记，也不得声称附件存在',
+    statusAdjusted && '内容状态已在本机编辑区调整为可发布；不要修改正文事实',
+  ].filter(Boolean);
+  const fixed = await improveDraft({ title, content: protectedDraft.content, kind: 'fix', issues }, apiKey, complete);
+  const repaired = protectedDraft.restore(fixed.content);
+  const publicationReport = await publicationAudit({ path: relativePath, title, content: repaired }, root);
+  return {
+    content: repaired,
+    review: reviewCsdnDraft({ title, content: repaired }),
+    publicationReport,
+    convertedLinks: protectedDraft.convertedLinks,
+    statusAdjusted,
+  };
+}
+
 async function askVault({ question, limit = 8 }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   const matches = await searchNotes(question, limit, root);
   const answer = await deepseekCompletion(
@@ -1130,6 +1207,7 @@ async function route(action, data, root, apiKey) {
   if (action === 'prepare_csdn') return prepareCsdnPayload(data);
   if (action === 'prepare_platform') return preparePlatformPayload(data);
   if (action === 'publication_audit') return publicationAudit(data, root);
+  if (action === 'repair_publication') return repairPublicationDraft(data, root, apiKey);
   if (action === 'publish_pack') return createPublishPack(data);
   if (action === 'closure_preview') return previewClosure(data, root);
   if (action === 'commit_closure') return commitClosure(data, root);
