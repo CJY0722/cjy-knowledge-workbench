@@ -118,6 +118,9 @@ test('prepares Obsidian markdown for the official CSDN editor', () => {
   assert.ok(platforms.find(item => item.platform === 'xiaohongshu').cardPages.length > 0);
   assert.match(platforms.find(item => item.platform === 'xiaohongshu').conversions.join('；'), /纯文本.*图卡/);
   assert.equal(Array.from(preparePlatformPayload({ platform: 'xiaohongshu', title: '这是一个超过二十个字符的小红书文章标题需要自动截取', content: '# 正文\n\n内容' }).title).length, 20);
+  const longXiaohongshu = preparePlatformPayload({ platform: 'xiaohongshu', title: '长图文', content: `# 正文\n\n${'很长的正文内容'.repeat(1500)}` });
+  assert.equal(longXiaohongshu.cardPages.length, 18);
+  assert.match(longXiaohongshu.warnings.join('；'), /最多上传 18 张.*仅生成前 18 张/);
   assert.throws(() => preparePlatformPayload({ platform: 'unknown', title: '标题', content: '正文' }), error => error.code === 'invalid_platform');
 });
 

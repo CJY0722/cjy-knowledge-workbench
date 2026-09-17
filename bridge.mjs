@@ -476,6 +476,7 @@ const PUBLISH_PLATFORMS = {
   wechat: { name: '微信公众号', editorUrl: 'https://mp.weixin.qq.com/', format: '富文本兼容稿', kind: 'rich-text' },
   xiaohongshu: { name: '小红书', editorUrl: 'https://creator.xiaohongshu.com/publish/publish', format: '长文纯文本 + 3:4 图卡', kind: 'plain-text' },
 };
+const XIAOHONGSHU_MAX_IMAGES = 18;
 
 const CALLOUT_LABELS = {
   note: '备注', tip: '提示', info: '说明', warning: '注意', caution: '注意',
@@ -604,10 +605,13 @@ export function preparePlatformPayload({ platform = 'csdn', title, content }) {
     conversions.push('Markdown 已转纯文本');
     warnings.push('已移除标题、链接、强调等 Markdown 标记，适合作为小红书长文底稿');
   }
-  const cardPages = platform === 'xiaohongshu' ? splitXiaohongshuCards(prepared) : undefined;
+  const generatedCardPages = platform === 'xiaohongshu' ? splitXiaohongshuCards(prepared) : undefined;
+  const cardPages = generatedCardPages?.slice(0, XIAOHONGSHU_MAX_IMAGES);
   if (cardPages) {
     conversions.push('长文已分页为 3:4 图卡');
-    warnings.push(`已分页为 ${cardPages.length} 张 3:4 图卡，请下载后逐张上传`);
+    warnings.push(generatedCardPages.length > XIAOHONGSHU_MAX_IMAGES
+      ? `正文原需 ${generatedCardPages.length} 张图卡；小红书单篇最多上传 ${XIAOHONGSHU_MAX_IMAGES} 张，当前仅生成前 ${XIAOHONGSHU_MAX_IMAGES} 张。请缩短正文或改发长文，避免遗漏后续内容`
+      : `已分页为 ${cardPages.length} 张 3:4 图卡，请下载后逐张上传`);
   }
   const preparedTitle = platform === 'xiaohongshu' ? Array.from(cleanTitle).slice(0, 20).join('') : cleanTitle;
   if (preparedTitle !== cleanTitle) warnings.push('小红书标题已截取为前 20 个字符，请发布前确认语义完整');
