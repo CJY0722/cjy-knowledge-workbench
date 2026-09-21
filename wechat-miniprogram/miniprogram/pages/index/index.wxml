@@ -1,0 +1,52 @@
+<view class="shell">
+  <view class="sidebar">
+    <view class="brand"><view class="brand-mark">知</view><view><text class="block">CJY 知识工作台</text><text class="muted">微信小程序离线版</text></view></view>
+    <view class="nav">
+      <button wx:for="{{tabs}}" wx:key="id" class="nav-item {{activeTab === item.id ? 'active' : ''}}" data-tab="{{item.id}}" bindtap="selectTab">{{item.label}}</button>
+    </view>
+    <view class="device-status"><view class="status-dot"></view><view><text class="block">当前设备可用</text><text class="muted">数据暂存微信本地</text></view></view>
+  </view>
+
+  <view class="content">
+    <view class="mobile-brand"><text>CJY 知识工作台</text><button bindtap="importMarkdown">导入</button></view>
+    <scroll-view class="mobile-nav" scroll-x enhanced show-scrollbar="false">
+      <button wx:for="{{tabs}}" wx:key="id" class="nav-chip {{activeTab === item.id ? 'active' : ''}}" data-tab="{{item.id}}" bindtap="selectTab">{{item.label}}</button>
+    </scroll-view>
+
+    <view wx:if="{{notice}}" class="notice">{{notice}}</view>
+
+    <view wx:if="{{activeTab === 'overview'}}" class="page">
+      <view class="page-head"><view><text class="h1">知识概览</text><text class="lead">在手机和电脑微信中整理 Markdown 与博客草稿。</text></view><button class="primary" bindtap="importMarkdown">导入 Markdown</button></view>
+      <view class="stats">
+        <view class="card"><text class="stat">{{notes.length}}</text><text class="block">本地笔记</text></view>
+        <view class="card"><text class="stat">{{tasks.length}}</text><text class="block">任务条目</text></view>
+        <view class="card"><text class="stat">{{filteredNotes.length}}</text><text class="block">当前结果</text></view>
+      </view>
+      <view class="panel empty" wx:if="{{!notes.length}}"><text class="h2">从第一篇笔记开始</text><text class="paragraph">把 Markdown 或 TXT 文件发送到微信“文件传输助手”，再点击导入。</text><button class="primary" bindtap="importMarkdown">选择微信文件</button></view>
+      <view class="panel" wx:else><text class="h2">最近笔记</text><view wx:for="{{notes}}" wx:key="id" wx:if="{{index < 6}}" class="note-row" data-id="{{item.id}}" bindtap="openNote"><view><text class="row-title">{{item.title}}</text><text class="muted">{{item.characters}} 字</text></view><text class="link">编辑</text></view></view>
+    </view>
+
+    <view wx:if="{{activeTab === 'today'}}" class="page">
+      <view class="page-head"><view><text class="h1">今日任务</text><text class="lead">自动识别 Markdown 中的 - [ ] 与 - [x] 任务。</text></view></view>
+      <view class="panel empty" wx:if="{{!tasks.length}}"><text class="h2">暂无任务</text><text class="paragraph">导入包含任务列表的 Markdown 笔记后会显示在这里。</text></view>
+      <view class="panel" wx:else><view wx:for="{{tasks}}" wx:key="line" class="task-row {{item.done ? 'done' : ''}}"><text class="task-check">{{item.done ? '✓' : '○'}}</text><view><text class="row-title">{{item.text}}</text><text class="muted">{{item.noteTitle}}{{item.due ? ' · ' + item.due : ''}}</text></view></view></view>
+    </view>
+
+    <view wx:if="{{activeTab === 'library'}}" class="page">
+      <view class="page-head"><view><text class="h1">知识库</text><text class="lead">搜索当前设备中已导入和新建的内容。</text></view><button class="primary" bindtap="importMarkdown">导入</button></view>
+      <input class="search" placeholder="搜索标题或正文" value="{{query}}" bindinput="setQuery" />
+      <view class="panel empty" wx:if="{{!filteredNotes.length}}"><text class="h2">没有匹配内容</text><text class="paragraph">换一个关键词，或先导入 Markdown 文件。</text></view>
+      <view class="note-grid" wx:else><view wx:for="{{filteredNotes}}" wx:key="id" class="note-card" data-id="{{item.id}}" bindtap="openNote"><text class="row-title">{{item.title}}</text><text class="excerpt">{{item.content}}</text><text class="muted">{{item.characters}} 字 · 点击编辑</text></view></view>
+    </view>
+
+    <view wx:if="{{activeTab === 'blog'}}" class="page">
+      <view class="page-head"><view><text class="h1">博客写作</text><text class="lead">新建或修改 Markdown 草稿，保存于当前设备。</text></view><button bindtap="newDraft">新建原创</button></view>
+      <view class="editor panel"><text class="field-label">文章标题</text><input value="{{editorTitle}}" placeholder="输入文章标题" bindinput="setEditorTitle" /><text class="field-label">Markdown 正文</text><textarea value="{{editorBody}}" placeholder="从这里开始写作，或在知识库中打开已有文章。" bindinput="setEditorBody" maxlength="-1" auto-height="false"></textarea><view class="actions"><button class="primary" bindtap="saveDraft">保存草稿</button><button bindtap="copyDraft">复制 Markdown</button></view></view>
+    </view>
+
+    <view wx:if="{{activeTab === 'settings'}}" class="page">
+      <view class="page-head"><view><text class="h1">设置与同步</text><text class="lead">当前版本无需服务器即可使用。</text></view></view>
+      <view class="panel settings-list"><view><text class="row-title">设备存储</text><text>已启用 · 仅当前微信设备</text></view><view><text class="row-title">电脑窗口</text><text>已启用可调整尺寸布局</text></view><view><text class="row-title">Obsidian 云同步</text><text>等待 AppID 与云环境 ID</text></view><view><text class="row-title">DeepSeek</text><text>等待服务端接入，不在客户端保存密钥</text></view></view>
+    </view>
+  </view>
+</view>

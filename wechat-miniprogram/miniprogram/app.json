@@ -1,0 +1,11 @@
+{
+  "pages": ["pages/index/index"],
+  "resizable": true,
+  "window": {
+    "navigationBarTitleText": "CJY 知识工作台",
+    "navigationBarBackgroundColor": "#eef2eb",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f7f2",
+    "backgroundTextStyle": "dark"
+  }
+}

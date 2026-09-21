@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vinext dev",
     "bridge": "node bridge.mjs",
+    "test:miniprogram": "node wechat-miniprogram/markdown.test.cjs",
     "build": "vinext build",
     "build:pages": "vite build --config vite.pages.config.ts",
     "start": "wrangler dev --config dist/server/wrangler.json",
