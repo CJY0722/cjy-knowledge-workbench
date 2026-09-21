@@ -184,6 +184,7 @@ export function BlogWorkbench({
   const [saveOpen, setSaveOpen] = useState(false);
   const [aiConsentOpen, setAiConsentOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [publishStarted, setPublishStarted] = useState(false);
   const [closureOpen, setClosureOpen] = useState(false);
   const [closure, setClosure] = useState({ preference: '', style: '', requirement: '', pitfall: '' });
   const [closurePreview, setClosurePreview] = useState<ClosurePreview | null>(null);
@@ -255,6 +256,7 @@ export function BlogWorkbench({
     setPublishPack(null);
     setPreparedPlatforms({});
     setXiaohongshuCards([]);
+    setPublishStarted(false);
     setClosurePreview(null);
     setPublicationReport(null);
   };
@@ -508,6 +510,7 @@ export function BlogWorkbench({
       setPreparedPlatforms(Object.fromEntries(results.map(item => [item.platform, item])) as Partial<Record<PlatformId, PreparedPlatform>>);
       const pages = results.find(item => item.platform === 'xiaohongshu')?.cardPages || [];
       setXiaohongshuCards(pages.map((page, index) => renderXiaohongshuCard(page, title, index, pages.length)));
+      setPublishStarted(false);
       setPublishOpen(true);
       onNotice('五个平台的适配物料已生成，可复制长文或下载小红书图卡。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '多平台发布准备失败'); }
@@ -518,6 +521,7 @@ export function BlogWorkbench({
     if (!publicationReport?.ready) return onNotice('请先执行发布就绪检查并解决全部阻塞项，再进入官方发布页。');
     const copyTask = copyText(item.content);
     const opened = window.open(item.editorUrl, '_blank');
+    if (opened) setPublishStarted(true);
     try { if (opened) opened.opener = null; } catch { /* cross-origin navigation raced with opener isolation */ }
     try {
       await copyTask;
@@ -530,6 +534,18 @@ export function BlogWorkbench({
         ? `${item.platformName} 发布页已打开，但正文复制失败；请返回工作台手动复制。`
         : `${item.platformName} 发布页被拦截且正文复制失败，请允许弹窗后重试。`);
     }
+  };
+
+  const clearEditorAfterPublish = () => {
+    if (!publishStarted) return onNotice('请先打开至少一个平台的官方发布页并完成人工发布。');
+    if (!window.confirm('确认文章已经在外部平台发布完成？确认后会清空当前编辑区、审核结果和已生成物料，但不会删除 Obsidian 中已保存的文章。')) return;
+    setMode('manual'); setMaterialKind('markdown'); setVisualVerified(false); setVisualEvidence('');
+    setFocusDecision('pending'); setSourceQuery(''); setSources([]); setSource(null); setRetrieval(null);
+    setTitle(''); setDraft(''); setDraftPath(''); setDraftUpdated(''); setSavedDraft(''); setSavedTitle('');
+    setReview(null); setHumanizer('pending'); setFinalized(false); setPublishPack(null);
+    setPreparedPlatforms({}); setXiaohongshuCards([]); setPublicationReport(null); setPublishStarted(false);
+    setClosure({ preference: '', style: '', requirement: '', pitfall: '' }); setClosurePreview(null); setPublishOpen(false);
+    onNotice('发布流程已完成，博客编辑区和生成物料已清空；Obsidian 中已保存的文章不受影响。');
   };
 
   const buildClosurePreview = async () => {
@@ -647,7 +663,7 @@ export function BlogWorkbench({
 
     <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}本机桥接会使用你的 API Key 鉴权，但不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料与发布中心</DialogTitle><DialogDescription>每个平台的发布按钮会复制对应正文并打开官方创作页；图片、标题和排版仍需人工核对，工作台不会读取平台账号或替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.conversions.length > 0 && <small className="blog-conversion-summary">已转换：{item.conversions.join('、')}</small>}{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}{platform.id === 'xiaohongshu' && <strong className="blog-xhs-mode-title">长文笔记 · 纯文本</strong>}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button variant="outline" onClick={async () => { await copyText(item.content); onNotice(`${platform.name} 正文已复制。`); }}><Clipboard />复制正文</Button><Button onClick={() => void publishToPlatform(item)}><ExternalLink />发布到{platform.name}</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <><div className="blog-xhs-card-heading"><strong>图文笔记 · {xiaohongshuCards.length} 张 PNG</strong><span>Markdown 已转为 1080 × 1440 图卡，请逐张下载上传。</span><Button onClick={() => void publishToPlatform(item, 'cards')}><ExternalLink />发布图文笔记</Button></div><div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div></>}</article>; })}</div></DialogContent></Dialog>
+    <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料与发布中心</DialogTitle><DialogDescription>每个平台的发布按钮会复制对应正文并打开官方创作页；图片、标题和排版仍需人工核对，工作台不会读取平台账号或替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.conversions.length > 0 && <small className="blog-conversion-summary">已转换：{item.conversions.join('、')}</small>}{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}{platform.id === 'xiaohongshu' && <strong className="blog-xhs-mode-title">长文笔记 · 纯文本</strong>}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button variant="outline" onClick={async () => { await copyText(item.content); onNotice(`${platform.name} 正文已复制。`); }}><Clipboard />复制正文</Button><Button onClick={() => void publishToPlatform(item)}><ExternalLink />发布到{platform.name}</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <><div className="blog-xhs-card-heading"><strong>图文笔记 · {xiaohongshuCards.length} 张 PNG</strong><span>Markdown 已转为 1080 × 1440 图卡，请逐张下载上传。</span><Button onClick={() => void publishToPlatform(item, 'cards')}><ExternalLink />发布图文笔记</Button></div><div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div></>}</article>; })}</div><DialogFooter><Button onClick={clearEditorAfterPublish} disabled={!publishStarted}><CheckCircle2 />已完成发布，清空编辑区</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={closureOpen} onOpenChange={setClosureOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>收尾入库预览</DialogTitle><DialogDescription>未审批前不会写入长期记忆。重复条目会自动跳过。</DialogDescription></DialogHeader>{closurePreview && <div className="blog-closure-preview"><pre>{closurePreview.summary}</pre>{closurePreview.entries.map((item) => <div key={`${item.category}-${item.value}`}><Badge variant="outline">{item.duplicate ? '重复·跳过' : '拟写入'}</Badge><span><strong>{item.category}</strong><small>{item.value}</small><small>{item.target}</small></span></div>)}</div>}<DialogFooter><Button variant="outline" onClick={() => setClosureOpen(false)}>返回修改</Button><Button onClick={commitClosure} disabled={busy === 'closure-save'}>{busy === 'closure-save' ? <Loader2 className="spin" /> : <Check />}审批并写入知识库</Button></DialogFooter></DialogContent></Dialog>
   </div>;
