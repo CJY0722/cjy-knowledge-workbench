@@ -22,8 +22,10 @@ button { margin: 0; padding: 18rpx 28rpx; line-height: 1; font-size: 24rpx; colo
 button.primary { color: #fff; background: #35634a; border-color: #35634a; }
 .notice { max-width: 1180rpx; margin: 0 auto 28rpx; padding: 20rpx 24rpx; color: #31533f; background: #e3eee5; border-radius: 14rpx; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22rpx; margin-bottom: 26rpx; }
+.stats.four { grid-template-columns: repeat(4, 1fr); }
 .card, .panel, .note-card { background: #fff; border: 1rpx solid #dfe5dc; border-radius: 22rpx; }
 .card { padding: 32rpx; }
+.stat { display: block; font-size: 48rpx; color: #315940; font-weight: 700; }
 .card strong, .card span { display: block; }
 .card strong { font-size: 52rpx; color: #315940; }
 .card span { margin-top: 8rpx; color: #718075; }
@@ -31,6 +33,7 @@ button.primary { color: #fff; background: #35634a; border-color: #35634a; }
 .empty { min-height: 250rpx; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .empty .paragraph { max-width: 620rpx; margin-bottom: 22rpx; }
 .note-row, .task-row { display: flex; align-items: center; justify-content: space-between; gap: 20rpx; padding: 22rpx 0; border-bottom: 1rpx solid #edf0eb; }
+.task-row { width: 100%; text-align: left; background: transparent; border-top: 0; border-right: 0; border-left: 0; border-radius: 0; }
 .note-row:last-child, .task-row:last-child { border-bottom: 0; }
 .row-title { font-weight: 700; }
 .link { color: #35634a; }
@@ -46,6 +49,23 @@ button.primary { color: #fff; background: #35634a; border-color: #35634a; }
 .field-label { display: block; margin: 6rpx 0 12rpx; color: #425047; font-weight: 700; }
 .editor textarea { box-sizing: border-box; width: 100%; height: 700rpx; margin: 12rpx 0 24rpx; padding: 24rpx; line-height: 1.7; background: #f9faf7; border: 1rpx solid #d6ded4; border-radius: 16rpx; }
 .actions { display: flex; gap: 16rpx; }
+.actions.wrap { flex-wrap: wrap; }
+.section-gap { margin-top: 24rpx; }
+.two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 22rpx; }
+.relation-row { display: flex; justify-content: space-between; gap: 20rpx; padding: 18rpx 0; border-bottom: 1rpx solid #edf0eb; }
+.warning { display: block; color: #a14f35; }
+.review-focus { cursor: pointer; }
+.excerpt.long { height: auto; max-height: 360rpx; white-space: pre-wrap; }
+.audit { display: grid; gap: 10rpx; }
+.audit.ready { border-color: #9fc3aa; background: #f4faf5; }
+.audit.blocked { border-color: #e1b5a5; background: #fff7f3; }
+.material-tabs { margin: 18rpx 0; white-space: nowrap; }
+.material-tabs .nav-chip { display: inline-block; margin-right: 12rpx; }
+.material textarea { box-sizing: border-box; width: 100%; height: 420rpx; margin: 18rpx 0; padding: 22rpx; line-height: 1.6; background: #f9faf7; border: 1rpx solid #d6ded4; border-radius: 16rpx; }
+.card-pages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16rpx; margin-top: 24rpx; }
+.text-card { min-height: 360rpx; padding: 24rpx; white-space: pre-wrap; line-height: 1.7; color: #25352b; background: #f6f3eb; border-left: 8rpx solid #35634a; border-radius: 16rpx; }
+.text-card small { display: block; margin-top: 20rpx; color: #718075; }
+button[disabled] { opacity: .45; }
 .settings-list { display: grid; gap: 0; }
 .settings-list > view { display: flex; justify-content: space-between; gap: 20rpx; padding: 24rpx 0; border-bottom: 1rpx solid #edf0eb; }
 .settings-list > view:last-child { border-bottom: 0; }
@@ -62,10 +82,11 @@ button.primary { color: #fff; background: #35634a; border-color: #35634a; }
   .nav-chip.active { color: #fff; background: #35634a; border-color: #35634a; }
   .page-head { align-items: flex-end; }
   .h1 { font-size: 36rpx; }
-  .stats { grid-template-columns: 1fr; gap: 14rpx; }
+  .stats, .stats.four, .two-columns { grid-template-columns: 1fr; gap: 14rpx; }
   .card { padding: 24rpx; }
   .note-grid { grid-template-columns: 1fr; }
   .editor textarea { height: 760rpx; }
+  .card-pages { grid-template-columns: 1fr; }
   .settings-list > view { display: block; }
   .settings-list span { display: block; margin-top: 8rpx; text-align: left; }
 }
