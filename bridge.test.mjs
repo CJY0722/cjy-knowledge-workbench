@@ -4,10 +4,23 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
+  commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, generateTitleCoverPlan, improveDraft, listDrafts, markdownToPlatformText,
   obsidianToStandardMarkdown, optimizePublicationWarnings, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, repairPublicationDraft, reviewCsdnDraft,
-  sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
+  readCsdnProfile, sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
+
+test('binds only a public CSDN homepage and reads reusable profile context', async () => {
+  const profile = await readCsdnProfile({ homepage: 'https://blog.csdn.net/demo_user?from=app' }, async () => new Response(`<!doctype html><title>示例作者的博客-CSDN博客</title><meta name="description" content="专注工程实践"><a href="https://blog.csdn.net/demo_user/article/details/1">从零写一个工具</a>`));
+  assert.equal(profile.homepage, 'https://blog.csdn.net/demo_user');
+  assert.equal(profile.displayName, '示例作者');
+  assert.deepEqual(profile.recentTitles, ['从零写一个工具']);
+  await assert.rejects(() => readCsdnProfile({ homepage: 'http://127.0.0.1/private' }), /只支持/);
+});
+
+test('creates a bounded AI title-cover plan', async () => {
+  const plan = await generateTitleCoverPlan({ title: '实体容器与键盘焦点', content: '# 正文' }, 'sk-test-key', async () => '```json\n{"label":"CAD 实战","subtitle":"从按键无响应找到事件焦点","primary":"#102A24","secondary":"#315F49","accent":"#F0B45D"}\n```');
+  assert.deepEqual(plan, { label: 'CAD 实战', subtitle: '从按键无响应找到事件焦点', primary: '#102A24', secondary: '#315F49', accent: '#F0B45D' });
+});
 
 test('protects a personal vault behind origin checks and pairing', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-bridge-'));
@@ -295,9 +308,16 @@ test('searches a source, generates a safe template, and versions saves', async (
   const matches = await searchNotes('Python 测试', 5, root);
   assert.equal(matches[0].path, '01-Knowledge/Python测试.md');
   assert.equal((await searchNotes('不应扫描的缓存内容', 5, root)).length, 0);
-  const draft = await generateDraft({ sourcePath: matches[0].path, instruction: '面向学生', useAi: false, preflightConfirmed: true }, root);
+  const draft = await generateDraft({ sourcePath: matches[0].path, instruction: '面向学生', csdnProfile: { homepage: 'https://blog.csdn.net/demo_user', displayName: '示例作者', description: '记录真实工程实践', recentTitles: ['从零写一个工具', '一次真实的排错记录'] }, useAi: false, preflightConfirmed: true }, root);
   assert.match(draft.content, /ai_generated: false/);
   assert.match(draft.content, /\[\[01-Knowledge\/Python测试\]\]/);
+  assert.match(draft.content, /> ### 👋 关于作者/);
+  assert.match(draft.content, /> 🫧 \*\*作者：\*\* 示例作者/);
+  assert.match(draft.content, /> ✨ \*\*CSDN 主页：\*\* \[https:\/\/blog\.csdn\.net\/demo_user\]\(https:\/\/blog\.csdn\.net\/demo_user\)/);
+  assert.match(draft.content, /> 🎯 \*\*创作方向：\*\* 记录真实工程实践/);
+  assert.match(draft.content, /> 📚 \*\*近期文章：\*\*[\s\S]*> - 从零写一个工具[\s\S]*> - 一次真实的排错记录/);
+  assert.match(draft.content, /欢迎访问主页查看同系列文章/);
+  assert.equal(draft.content.match(/https:\/\/blog\.csdn\.net\/demo_user/g)?.length, 3);
   const approved = { approved: true, preflightConfirmed: true, focusDecision: 'confirmed', reviewConfirmed: true };
   const validContent = `${draft.content.replaceAll('待补充', '已核对')}\n\n## 验证\n\n验证内容已核对。`;
   const first = await saveDraft({ title: draft.title, content: validContent, sourcePath: matches[0].path, ...approved }, root);

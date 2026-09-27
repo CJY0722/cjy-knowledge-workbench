@@ -3,8 +3,8 @@
 import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
 import {
   BookCheck, Check, CheckCircle2, Clipboard, ExternalLink, FileCheck2, FilePenLine,
-  FilePlus2, Library, Loader2, LockKeyhole, RefreshCw, Save, Search, Send,
-  ShieldCheck, Sparkles, TriangleAlert, Upload,
+  FilePlus2, ImageIcon, Library, Link2, Loader2, LockKeyhole, RefreshCw, Save, Search, Send,
+  ShieldCheck, Sparkles, TriangleAlert, Unlink, Upload,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -48,6 +48,9 @@ type WritingMode = 'manual' | 'ai' | 'revise';
 type HumanizerStatus = 'pending' | 'checked' | 'skipped';
 type MaterialKind = 'markdown' | 'visual';
 type VisualMaterial = { name: string; dataUrl: string; page?: number };
+type CsdnProfile = { homepage: string; username: string; displayName: string; description: string; recentTitles: string[] };
+type CoverPlan = { label: string; subtitle: string; primary: string; secondary: string; accent: string };
+type TitleCover = { dataUrl: string; filename: string };
 
 const SESSION_KEY = 'cjy-blog-session-v1';
 const BLOG_GUIDE_URL = 'https://github.com/CJY0722/cjy-knowledge-workbench/blob/main/docs/BLOG_GUIDE.md';
@@ -120,6 +123,50 @@ function XiaohongshuCardPreview({ card, index }: { card: XiaohongshuCard; index:
 function VisualMaterialPreview({ item }: { item: VisualMaterial }) {
   // oxlint-disable-next-line next/no-img-element -- local file preview is never uploaded or served by the image optimizer
   return <img src={item.dataUrl} alt={`${item.name}${item.page ? ` 第 ${item.page} 页` : ''}`} />;
+}
+
+function renderTitleCover(plan: CoverPlan, title: string, profile: CsdnProfile | null): TitleCover {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1200;
+  canvas.height = 630;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法生成标题图');
+  const gradient = context.createLinearGradient(0, 0, 1200, 630);
+  gradient.addColorStop(0, plan.primary);
+  gradient.addColorStop(1, plan.secondary);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 1200, 630);
+  context.globalAlpha = 0.16;
+  context.fillStyle = '#ffffff';
+  context.beginPath(); context.arc(1050, 90, 210, 0, Math.PI * 2); context.fill();
+  context.beginPath(); context.arc(1110, 560, 290, 0, Math.PI * 2); context.fill();
+  context.globalAlpha = 1;
+  context.fillStyle = plan.accent;
+  context.fillRect(76, 82, 78, 7);
+  context.fillStyle = '#ffffff';
+  context.font = '600 28px "Microsoft YaHei UI", sans-serif';
+  context.fillText(plan.label, 76, 138);
+  context.font = '700 56px "Microsoft YaHei UI", sans-serif';
+  const lines: string[] = [];
+  let line = '';
+  for (const char of title.trim()) {
+    if (context.measureText(line + char).width > 900 && line) { lines.push(line); line = char; }
+    else line += char;
+  }
+  if (line) lines.push(line);
+  lines.slice(0, 3).forEach((value, index) => context.fillText(value, 76, 235 + index * 78));
+  context.fillStyle = 'rgba(255,255,255,.82)';
+  context.font = '28px "Microsoft YaHei UI", sans-serif';
+  context.fillText(plan.subtitle, 76, 510);
+  context.font = '24px "Microsoft YaHei UI", sans-serif';
+  context.fillText(profile?.displayName ? `${profile.displayName} · CSDN` : 'CJY · 技术博客', 76, 568);
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 50) || '文章标题图';
+  return { dataUrl: canvas.toDataURL('image/png'), filename: `${safeTitle}-封面.png` };
+}
+
+function TitleCoverPreview({ cover, title }: { cover: TitleCover; title: string }) {
+  // oxlint-disable-next-line next/no-img-element -- generated canvas data URL is local and cannot use the framework image optimizer
+  return <img src={cover.dataUrl} alt={`${title} 的 AI 标题图`} />;
 }
 
 async function fileToDataUrl(file: File) {
@@ -215,7 +262,7 @@ export function BlogWorkbench({
   const [visualText, setVisualText] = useState('');
   const [focusDecision, setFocusDecision] = useState<'pending' | 'confirmed' | 'skipped'>('pending');
   const [focus, setFocus] = useState('先给结论，再解释原理；只保留有来源或可验证的技术事实。');
-  const [instruction, setInstruction] = useState('面向软件工程学生，解释关键代码，不虚构运行结果。');
+  const [instruction, setInstruction] = useState('面向软件工程学生；采用“系列标题—问题清单—编号章节—代码与原因—踩坑验证—总结与下一篇”的结构，不复制参考文章原文，不虚构运行结果。');
   const [sourceQuery, setSourceQuery] = useState('');
   const [sources, setSources] = useState<SourceNote[]>([]);
   const [source, setSource] = useState<SourceNote | null>(null);
@@ -243,6 +290,9 @@ export function BlogWorkbench({
   const [closureOpen, setClosureOpen] = useState(false);
   const [closure, setClosure] = useState({ preference: '', style: '', requirement: '', pitfall: '' });
   const [closurePreview, setClosurePreview] = useState<ClosurePreview | null>(null);
+  const [csdnHomepage, setCsdnHomepage] = useState('');
+  const [csdnProfile, setCsdnProfile] = useState<CsdnProfile | null>(null);
+  const [titleCover, setTitleCover] = useState<TitleCover | null>(null);
 
   const request = async <T,>(action: string, payload: Record<string, unknown> = {}) => {
     if (!bridgeToken) throw new Error('请先在设置中连接自己的 Obsidian');
@@ -272,7 +322,7 @@ export function BlogWorkbench({
   useEffect(() => {
     let active = true;
     try {
-      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') as Partial<{ mode: WritingMode; materialKind: MaterialKind; visualEvidence: string; visualVerified: boolean; focusDecision: 'pending' | 'confirmed' | 'skipped'; title: string; draft: string; draftPath: string; draftUpdated: string; savedDraft: string; savedTitle: string; focus: string; instruction: string; source: SourceNote }>;
+      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') as Partial<{ mode: WritingMode; materialKind: MaterialKind; visualEvidence: string; visualVerified: boolean; focusDecision: 'pending' | 'confirmed' | 'skipped'; title: string; draft: string; draftPath: string; draftUpdated: string; savedDraft: string; savedTitle: string; focus: string; instruction: string; source: SourceNote; csdnHomepage: string; csdnProfile: CsdnProfile }>;
       queueMicrotask(() => {
         if (!active) return;
         if (saved.mode === 'manual' || saved.mode === 'ai' || saved.mode === 'revise') setMode(saved.mode);
@@ -289,14 +339,16 @@ export function BlogWorkbench({
         if (typeof saved.focus === 'string') setFocus(saved.focus);
         if (typeof saved.instruction === 'string') setInstruction(saved.instruction);
         if (saved.source?.path) setSource(saved.source);
+        if (typeof saved.csdnHomepage === 'string') setCsdnHomepage(saved.csdnHomepage);
+        if (saved.csdnProfile?.homepage) setCsdnProfile(saved.csdnProfile);
       });
     } catch { /* session cache is optional */ }
     return () => { active = false; };
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source }));
-  }, [mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source]);
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source, csdnHomepage, csdnProfile }));
+  }, [mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source, csdnHomepage, csdnProfile]);
 
   const dirty = Boolean(draftPath && (draft !== savedDraft || title !== savedTitle));
   const retrievalCount = retrieval?.reduce((sum, item) => sum + item.matches.length, 0) || 0;
@@ -321,6 +373,7 @@ export function BlogWorkbench({
     setPublishStarted(false);
     setClosurePreview(null);
     setPublicationReport(null);
+    setTitleCover(null);
   };
 
   const changeDraft = (value: string) => {
@@ -413,8 +466,8 @@ export function BlogWorkbench({
     setBusy(useAi ? 'generate' : 'template');
     try {
       const result = mode === 'ai'
-        ? await request<{ title: string; content: string }>('generate_csdn', { sourcePath: source?.path, sourceName: hasVisualSource ? visualMaterials[0]?.name : '', visualText: hasVisualSource ? visualText : '', images: hasVisualSource ? visualMaterials.map(item => item.dataUrl) : [], title, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, useAi, preflightConfirmed: true })
-        : await request<{ title: string; content: string }>('revise_csdn', { title, content: draft, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, useAi, preflightConfirmed: true });
+        ? await request<{ title: string; content: string }>('generate_csdn', { sourcePath: source?.path, sourceName: hasVisualSource ? visualMaterials[0]?.name : '', visualText: hasVisualSource ? visualText : '', images: hasVisualSource ? visualMaterials.map(item => item.dataUrl) : [], title, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, csdnProfile, useAi, preflightConfirmed: true })
+        : await request<{ title: string; content: string }>('revise_csdn', { title, content: draft, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, csdnProfile, useAi, preflightConfirmed: true });
       setTitle(result.title);
       changeDraft(result.content);
       setDraftPath(''); setDraftUpdated(''); setSavedDraft(''); setSavedTitle('');
@@ -428,6 +481,35 @@ export function BlogWorkbench({
     const issue = generationIssue();
     if (issue) return onNotice(issue);
     setAiConsentOpen(true);
+  };
+
+  const bindCsdnProfile = async (event: { preventDefault(): void }) => {
+    event.preventDefault();
+    if (!csdnHomepage.trim()) return onNotice('请输入 CSDN 博客主页地址。');
+    setBusy('csdn-profile');
+    try {
+      const profile = await request<CsdnProfile>('csdn_profile', { homepage: csdnHomepage });
+      setCsdnProfile(profile); setCsdnHomepage(profile.homepage);
+      onNotice(`已绑定 ${profile.displayName} 的公开 CSDN 主页；以后 AI 生成初稿会自动带入主页信息和近期标题风格。`);
+    } catch (error) { onNotice(error instanceof Error ? error.message : 'CSDN 主页绑定失败'); }
+    finally { setBusy(''); }
+  };
+
+  const unbindCsdnProfile = () => {
+    setCsdnProfile(null); setCsdnHomepage('');
+    onNotice('已解除 CSDN 公开主页绑定；未修改 CSDN 账号本身。');
+  };
+
+  const generateTitleCover = async () => {
+    if (!title.trim()) return onNotice('请先填写文章标题。');
+    if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
+    setBusy('title-cover');
+    try {
+      const plan = await request<CoverPlan>('generate_title_cover', { title, content: draft, csdnProfile });
+      setTitleCover(renderTitleCover(plan, title, csdnProfile));
+      onNotice('AI 标题图已生成；请预览并下载 PNG，发布时再人工上传。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : '标题图生成失败'); }
+    finally { setBusy(''); }
   };
 
   const importVisualMaterials = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -702,6 +784,12 @@ export function BlogWorkbench({
       <div className="blog-inline-actions">{!bridgeOnline && <Button onClick={onConnect}><ShieldCheck />连接 Obsidian</Button>}{bridgeOnline && !deepseekConfigured && <Button onClick={onConfigure}><Sparkles />配置 DeepSeek</Button>}<a className="blog-guide-link" href={BLOG_GUIDE_URL} target="_blank" rel="noreferrer">查看使用指南</a></div>
     </section>
 
+    <section className="plain-block blog-account-card">
+      <div className="blog-card-title"><Link2 /><div><strong>CSDN 写作身份</strong><span>每位使用者都可绑定自己的公开博客主页；不读取密码、Cookie 或登录令牌。</span></div></div>
+      <form onSubmit={bindCsdnProfile}><Input aria-label="CSDN 博客主页" value={csdnHomepage} onChange={(event) => setCsdnHomepage(event.target.value)} placeholder="https://blog.csdn.net/你的用户名" /><Button type="submit" disabled={busy === 'csdn-profile'}>{busy === 'csdn-profile' ? <Loader2 className="spin" /> : <Link2 />}{busy === 'csdn-profile' ? '读取中…' : csdnProfile ? '刷新绑定' : '绑定公开主页'}</Button>{csdnProfile && <Button type="button" variant="outline" onClick={unbindCsdnProfile}><Unlink />解除绑定</Button>}</form>
+      {csdnProfile ? <div className="blog-account-summary"><strong>{csdnProfile.displayName}</strong><a href={csdnProfile.homepage} target="_blank" rel="noreferrer">{csdnProfile.homepage}</a><span>{csdnProfile.description || '主页未提供公开简介'}</span><small>近期标题：{csdnProfile.recentTitles.slice(0, 4).join(' · ') || '未读取到公开文章标题'}</small></div> : <small className="blog-meta">绑定只保存在当前浏览器；其他用户可在自己的浏览器绑定或更换为自己的 CSDN 主页。</small>}
+    </section>
+
     <div className="blog-config-grid">
       <section className="plain-block blog-config-card">
         <div className="blog-card-title"><FilePenLine /><div><strong>写作设置</strong><span>先选路径，再进入初稿</span></div></div>
@@ -729,11 +817,12 @@ export function BlogWorkbench({
     <section className="plain-block blog-editor-card">
       <header>
         <div><strong>Markdown 初稿</strong><span>{draftPath ? dirty ? '有未保存修改' : `已写入 ${draftPath}` : '尚未写入文件'}</span></div>
-        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && !hasVisualSource && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
+        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && !hasVisualSource && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}<Button variant="outline" onClick={() => void generateTitleCover()} disabled={Boolean(busy) || !title.trim()}>{busy === 'title-cover' ? <Loader2 className="spin" /> : <ImageIcon />}{busy === 'title-cover' ? '生成中…' : 'AI 生成标题图'}</Button></div>
       </header>
       {drafts.length > 0 && <><div className="blog-pipeline-toolbar"><div><strong>内容管线</strong><small>{drafts.length} 篇文章 · 按 Obsidian frontmatter 状态筛选</small></div><div className="blog-pipeline-filters"><button type="button" aria-pressed={draftFilter === 'all'} onClick={() => setDraftFilter('all')}>全部 {drafts.length}</button>{BLOG_STATUS_OPTIONS.map(item => <button type="button" key={item.id} aria-pressed={draftFilter === item.id} onClick={() => setDraftFilter(item.id)}>{item.label} {draftCounts[item.id]}</button>)}</div></div><div className="blog-draft-list">{filteredDrafts.length ? filteredDrafts.map((item) => <button type="button" aria-label={`打开文章：${item.title}`} key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path} · {(item.characters || 0).toLocaleString('zh-CN')} 字</small></span><span className="blog-draft-meta"><Badge variant="outline">{BLOG_STATUS_LABELS[item.status || 'draft']}</Badge><small>内容质量 {item.qualityScore ?? '—'} · {item.issueCount ?? '—'} 项提醒</small><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></span></button>) : <div className="blog-empty-row">当前状态下没有文章。</div>}</div></>}
       <label className="blog-title-field" htmlFor="blog-title">文章标题<Input id="blog-title" value={title} onChange={(event) => { setTitle(event.target.value); setRetrieval(null); invalidateOutcome(); }} maxLength={100} placeholder="输入文章标题" /></label>
       <label className="blog-instruction-field" htmlFor="blog-instruction">本次要求<Input id="blog-instruction" value={instruction} onChange={(event) => { setInstruction(event.target.value); setFinalized(false); setPublishPack(null); setPreparedPlatforms({}); }} /></label>
+      {titleCover && <div className="blog-title-cover"><TitleCoverPreview cover={titleCover} title={title} /><div><strong>1200 × 630 标题图</strong><span>AI 生成设计方案，本机渲染；发布前请人工核对文字和配色。</span><a href={titleCover.dataUrl} download={titleCover.filename}>下载 PNG</a></div></div>}
       <div className="blog-editor-grid"><Textarea value={draft} onChange={(event) => changeDraft(event.target.value)} rows={24} placeholder={mode === 'manual' ? '从这里开始写 Markdown…' : mode === 'revise' ? '粘贴或导入你已经写好的 Markdown…' : '完成预检并选择知识源后生成初稿…'} /><div className="blog-preview"><span>安全文本预览</span><pre>{preview}</pre></div></div>
       <footer><span>{draft ? `${draft.split(/\r?\n/).length} 行 · ${draft.replace(/\s/g, '').length.toLocaleString('zh-CN')} 字` : '0 行 · 0 字'}</span><div className="blog-inline-actions"><Button variant="outline" onClick={reviewDraft} disabled={Boolean(busy)}><ShieldCheck />审核检查</Button><Button onClick={openSaveDialog} disabled={Boolean(busy)}><Save />确认后写入</Button></div></footer>
     </section>
@@ -784,7 +873,7 @@ export function BlogWorkbench({
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? hasVisualSource ? `将把 ${visualMaterials.length} 张 PDF 页面或代码图片、提取文本、写作要求和预检摘要发送给 DeepSeek。` : '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}本机桥接会使用你的 API Key 鉴权，但不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
+    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? hasVisualSource ? `将把 ${visualMaterials.length} 张 PDF 页面或代码图片、提取文本、写作要求和预检摘要发送给 DeepSeek。` : '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}{csdnProfile ? '还会发送已绑定主页的公开昵称、简介、主页地址和近期文章标题。' : ''}本机桥接会使用你的 API Key 鉴权，但不会发送密码、Cookie、登录令牌或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
 
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料与发布中心</DialogTitle><DialogDescription>每个平台的发布按钮会复制对应正文并打开官方创作页；图片、标题和排版仍需人工核对，工作台不会读取平台账号或替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.conversions.length > 0 && <small className="blog-conversion-summary">已转换：{item.conversions.join('、')}</small>}{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}{platform.id === 'xiaohongshu' && <strong className="blog-xhs-mode-title">长文笔记 · 纯文本</strong>}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button variant="outline" onClick={async () => { await copyText(item.content); onNotice(`${platform.name} 正文已复制。`); }}><Clipboard />复制正文</Button><Button onClick={() => void publishToPlatform(item)}><ExternalLink />发布到{platform.name}</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <><div className="blog-xhs-card-heading"><strong>图文笔记 · {xiaohongshuCards.length} 张 PNG</strong><span>Markdown 已转为 1080 × 1440 图卡，请逐张下载上传。</span><Button onClick={() => void publishToPlatform(item, 'cards')}><ExternalLink />发布图文笔记</Button></div><div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div></>}</article>; })}</div><DialogFooter><Button onClick={clearEditorAfterPublish} disabled={!publishStarted}><CheckCircle2 />已完成发布，清空编辑区</Button></DialogFooter></DialogContent></Dialog>
 

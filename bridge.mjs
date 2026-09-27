@@ -651,10 +651,31 @@ export async function searchNotes(query = '', limit = 10, root = DEFAULT_VAULT) 
   return results.sort((a, b) => b.score - a.score || b.updated.localeCompare(a.updated)).slice(0, Math.min(20, Math.max(1, Number(limit) || 10)));
 }
 
-function frontmatter(title, sourcePath, aiGenerated, sourceLabel = '') {
+function csdnProfileContext(profile = {}) {
+  const homepage = String(profile.homepage || '').slice(0, 200);
+  if (!homepage) return '';
+  const recentTitles = Array.isArray(profile.recentTitles) ? profile.recentTitles.slice(0, 8).map(item => String(item).slice(0, 120)) : [];
+  return `\n绑定的 CSDN 公开主页：${homepage}\n博主名称：${String(profile.displayName || profile.username || '').slice(0, 80)}\n公开简介：${String(profile.description || '').slice(0, 300)}\n近期文章标题：${recentTitles.join('；') || '未读取到'}\n写作时参考其系列化标题与公开内容定位，但不得复制既有文章。结构优先采用“问题背景—本篇目标—编号章节—代码与原因—踩坑和验证—总结与下一步”。作者主页模块由系统统一插入，正文不要重复输出。`;
+}
+
+function withCsdnAuthorBlock(body, profile = {}) {
+  const homepage = String(profile.homepage || '').trim();
+  if (!/^https:\/\/blog\.csdn\.net\/[A-Za-z0-9_-]+\/?$/.test(homepage) || String(body).includes(homepage)) return String(body).trim();
+  const clean = (value, limit) => String(value || '').replace(/[\r\n]+/g, ' ').replaceAll('[', '').replaceAll(']', '').replaceAll('*', '').replaceAll('_', '').replaceAll('`', '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const name = clean(profile.displayName || profile.username, 80) || 'CSDN 博主';
+  const description = clean(profile.description, 180);
+  const recentTitles = Array.isArray(profile.recentTitles) ? profile.recentTitles.map(title => clean(title, 100)).filter(Boolean).slice(0, 3) : [];
+  const recent = recentTitles.length ? `\n>\n> 📚 **近期文章：**\n${recentTitles.map(title => `> - ${title}`).join('\n')}` : '';
+  const block = `> ### 👋 关于作者\n>\n> 🫧 **作者：** ${name}  \n> ✨ **CSDN 主页：** [${homepage}](${homepage})${description ? `  \n> 🎯 **创作方向：** ${description}` : ''}${recent}\n>\n> 持续分享学习笔记与真实工程实践，欢迎访问主页查看同系列文章。`;
+  const source = String(body).trim();
+  return /^#\s+.+$/m.test(source) ? source.replace(/^#\s+.+$/m, match => `${match}\n\n${block}`) : `${block}\n\n${source}`;
+}
+
+function frontmatter(title, sourcePath, aiGenerated, sourceLabel = '', csdnProfile = {}) {
   const date = new Date().toISOString().slice(0, 10);
   const source = sourcePath ? `"[[${sourcePath.replace(/\.md$/i, '')}]]"` : JSON.stringify(sourceLabel || '用户原创');
-  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: ${sourcePath ? 'knowledge' : sourceLabel ? 'imported' : 'original'}\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
+  const author = csdnProfile?.homepage ? `\nauthor: ${JSON.stringify(String(csdnProfile.displayName || csdnProfile.username || '').slice(0, 80))}\nauthor_homepage: ${JSON.stringify(String(csdnProfile.homepage).slice(0, 200))}` : '';
+  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: ${sourcePath ? 'knowledge' : sourceLabel ? 'imported' : 'original'}${author}\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
 }
 
 function templateBody(title, sourcePath, sourceContent, instruction) {
@@ -704,7 +725,7 @@ async function generateWithDeepSeek(sourcePath, sourceContent, instruction, writ
   return withoutFrontmatter(await deepseekCompletion(system, user, key, fetch, images));
 }
 
-export async function generateDraft({ sourcePath = '', sourceName = '', visualText = '', images = [], title: requestedTitle = '', instruction = '', useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
+export async function generateDraft({ sourcePath = '', sourceName = '', visualText = '', images = [], title: requestedTitle = '', instruction = '', csdnProfile = {}, useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   if (preflightConfirmed !== true) throw apiError('生成初稿前必须完成知识库预检', 'preflight_required');
   const visualInputs = visionImages(images);
   let sourceContent = String(visualText || '').slice(0, 100_000);
@@ -720,21 +741,64 @@ export async function generateDraft({ sourcePath = '', sourceName = '', visualTe
   const title = sourceTitle || '导入材料整理';
   const sourceLabel = sourcePath || String(sourceName || '导入视觉材料');
   const preflight = await writingPreflight({ topic: title }, root);
-  const context = writingContext(preflight);
+  const context = `${writingContext(preflight)}${csdnProfileContext(csdnProfile)}`;
   const body = useAi
     ? await generateWithDeepSeek(sourceLabel, sourceContent || '正文与代码信息见随附视觉材料。', instruction, context, false, apiKey, visualInputs)
     : templateBody(title, sourcePath || sourceLabel, sourceContent, instruction);
-  return { title, content: `${frontmatter(title, sourcePath, useAi, sourcePath ? '' : sourceLabel)}\n\n${body.trim()}\n`, source: sourcePath ? { path: sourcePath, title: sourceTitle } : null, mode: useAi ? 'ai' : 'template' };
+  return { title, content: `${frontmatter(title, sourcePath, useAi, sourcePath ? '' : sourceLabel, csdnProfile)}\n\n${withCsdnAuthorBlock(body, csdnProfile)}\n`, source: sourcePath ? { path: sourcePath, title: sourceTitle } : null, mode: useAi ? 'ai' : 'template' };
 }
 
-export async function reviseDraft({ title, content, instruction = '', useAi = true, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
+export async function reviseDraft({ title, content, instruction = '', csdnProfile = {}, useAi = true, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   if (preflightConfirmed !== true) throw apiError('修改初稿前必须完成知识库预检', 'preflight_required');
   const cleanTitle = String(title || '').trim() || titleFromMarkdown(String(content || ''), '未命名文章');
   if (!String(content || '').trim()) throw apiError('已有文章不能为空');
   const preflight = await writingPreflight({ topic: cleanTitle }, root);
-  const context = writingContext(preflight);
+  const context = `${writingContext(preflight)}${csdnProfileContext(csdnProfile)}`;
   const body = useAi ? await generateWithDeepSeek('用户已有文章', withoutFrontmatter(String(content)), instruction, context, true, apiKey) : withoutFrontmatter(String(content));
-  return { title: cleanTitle, content: `${frontmatter(cleanTitle, '', useAi)}\n\n${body.trim()}\n`, mode: useAi ? 'ai-revise' : 'unchanged' };
+  return { title: cleanTitle, content: `${frontmatter(cleanTitle, '', useAi, '', csdnProfile)}\n\n${body.trim()}\n`, mode: useAi ? 'ai-revise' : 'unchanged' };
+}
+
+function decodeHtml(value = '') {
+  return String(value).replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16))).replaceAll('&quot;', '"').replaceAll('&#39;', "'").replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&nbsp;', ' ');
+}
+
+function htmlText(value = '') {
+  return decodeHtml(String(value).replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+export async function readCsdnProfile({ homepage = '' }, fetcher = fetch) {
+  let url;
+  try { url = new URL(String(homepage).trim()); } catch { throw apiError('请输入有效的 CSDN 博客主页地址', 'invalid_csdn_homepage'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'blog.csdn.net' || !/^\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) throw apiError('只支持 https://blog.csdn.net/用户名 格式的公开主页', 'invalid_csdn_homepage');
+  const username = url.pathname.split('/').filter(Boolean)[0];
+  const normalized = `https://blog.csdn.net/${username}`;
+  const response = await fetcher(normalized, { headers: { 'User-Agent': 'Mozilla/5.0 KnowledgeWorkbench/1.0', Accept: 'text/html' } });
+  if (!response.ok) throw apiError(`CSDN 主页读取失败（HTTP ${response.status}）`, 'csdn_profile_failed');
+  const html = (await response.text()).slice(0, 2_000_000);
+  const meta = (name) => {
+    for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
+      const attributes = Object.fromEntries([...tag.matchAll(/([\w:-]+)\s*=\s*["']([^"']*)["']/g)].map(match => [match[1].toLowerCase(), decodeHtml(match[2])]));
+      if ((attributes.name || attributes.property || '').toLowerCase() === name) return attributes.content || '';
+    }
+    return '';
+  };
+  const pageTitle = htmlText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
+  const recentTitles = [...new Set([...(html.matchAll(/<a\b[^>]*href=["'][^"']*\/article\/details\/\d+[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi) || [])].map(match => {
+    const heading = match[1].match(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i)?.[1];
+    return htmlText(heading || match[1]).replace(/\s+(原创|转载|翻译)\s+博文[\s\S]*$/, '').trim();
+  }).filter(item => item.length >= 4 && item.length <= 120))].slice(0, 8);
+  const displayName = (meta('og:title') || pageTitle).replace(/[-_]?CSDN博客.*$/i, '').replace(/的博客.*$/, '').trim() || username;
+  return { homepage: normalized, username, displayName: displayName.slice(0, 80), description: (meta('description') || meta('og:description')).slice(0, 300), recentTitles };
+}
+
+export async function generateTitleCoverPlan({ title = '', content = '', csdnProfile = {} }, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
+  const cleanTitle = String(title).trim();
+  if (!cleanTitle) throw apiError('请先填写文章标题', 'title_required');
+  const answer = await complete('你是克制的技术文章封面设计师。只返回 JSON，不要 Markdown。根据标题与正文生成简洁、专业、适合 CSDN 的封面文案和配色，不得虚构作者身份。字段必须是 label、subtitle、primary、secondary、accent；颜色必须是 6 位十六进制。', `文章标题：${cleanTitle.slice(0, 100)}\n作者：${String(csdnProfile.displayName || '').slice(0, 80)}\n正文摘要：${withoutFrontmatter(String(content)).replace(/[#>*`]/g, '').slice(0, 1200)}`, apiKey);
+  let parsed;
+  try { parsed = JSON.parse(String(answer).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); } catch { throw apiError('AI 返回的标题图方案无法解析，请重试', 'invalid_cover_plan'); }
+  const color = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : fallback;
+  return { label: String(parsed.label || '技术实践').slice(0, 16), subtitle: String(parsed.subtitle || '从问题到可验证的解决方案').slice(0, 48), primary: color(parsed.primary, '#16352B'), secondary: color(parsed.secondary, '#315F49'), accent: color(parsed.accent, '#E4B45B') };
 }
 
 export async function improveDraft({ title, content, kind, issues = [] }, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
@@ -1280,6 +1344,8 @@ async function route(action, data, root, apiKey) {
   if (action === 'writing_preflight') return writingPreflight(data, root);
   if (action === 'generate_csdn') return generateDraft(data, root, apiKey);
   if (action === 'revise_csdn') return reviseDraft(data, root, apiKey);
+  if (action === 'csdn_profile') return readCsdnProfile(data);
+  if (action === 'generate_title_cover') return generateTitleCoverPlan(data, apiKey);
   if (action === 'improve_csdn') return improveDraft(data, apiKey);
   if (action === 'review_csdn') return reviewCsdnDraft(data);
   if (action === 'save_csdn') return saveDraft(data, root);
