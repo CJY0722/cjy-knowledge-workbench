@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   commitClosure, createBridge, createPublishPack, deepseekCompletion, generateDraft, improveDraft, listDrafts, markdownToPlatformText,
-  obsidianToStandardMarkdown, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, repairPublicationDraft, reviewCsdnDraft,
+  obsidianToStandardMarkdown, optimizePublicationWarnings, prepareCsdnPayload, preparePlatformPayload, previewClosure, publicationAudit, repairPublicationDraft, reviewCsdnDraft,
   sanitizeFileName, saveDraft, searchNotes, splitXiaohongshuCards, writingPreflight,
 } from './bridge.mjs';
 
@@ -274,15 +274,27 @@ TODO：补全正文。参考 [[20-项目/私有发布源]] 和 [[缺失笔记]]�
   assert.match(result.publicationReport.blockers.join('；'), /缺失附件/);
   assert.equal(await readFile(articlePath, 'utf8'), articleBefore);
   assert.equal(await readFile(privatePath, 'utf8'), privateBefore);
+
+  const plainResult = await repairPublicationDraft(
+    { path: '06-Content/CSDN/自动修复测试.md', title: '无元数据初稿', content: '# 无元数据初稿\n\n## 内容\n\n正文。\n\n## 结论\n\n完成。' },
+    root,
+    'test-key',
+    async () => '# 无元数据初稿\n\n## 内容\n\n正文。\n\n## 结论\n\n完成。',
+  );
+  assert.match(plainResult.content, /^---\nstatus: ready\n---/);
+  assert.doesNotMatch(plainResult.publicationReport.blockers.join('；'), /内容状态/);
 });
 
 test('searches a source, generates a safe template, and versions saves', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-'));
+  await mkdir(path.join(root, '.pytest_cache'));
+  await writeFile(path.join(root, '.pytest_cache', 'ignored.md'), '# 不应扫描的缓存内容', 'utf8');
   const sourceDir = path.join(root, '01-Knowledge');
   await mkdir(sourceDir, { recursive: true });
   await writeFile(path.join(sourceDir, 'Python测试.md'), '# Python 测试\n\npytest 通过断言验证行为。', 'utf8');
   const matches = await searchNotes('Python 测试', 5, root);
   assert.equal(matches[0].path, '01-Knowledge/Python测试.md');
+  assert.equal((await searchNotes('不应扫描的缓存内容', 5, root)).length, 0);
   const draft = await generateDraft({ sourcePath: matches[0].path, instruction: '面向学生', useAi: false, preflightConfirmed: true }, root);
   assert.match(draft.content, /ai_generated: false/);
   assert.match(draft.content, /\[\[01-Knowledge\/Python测试\]\]/);
@@ -331,6 +343,39 @@ test('fixes blockers and humanizes a draft without losing frontmatter', async ()
   );
   assert.match(humanized.content, /^---[\s\S]*source: "\[\[来源\]\]"/);
   assert.equal(humanized.review.blockers.length, 0);
+
+  const beginner = await improveDraft(
+    { title: '测试', content: humanized.content, kind: 'beginner' },
+    'test-key',
+    async (system) => {
+      assert.match(system, /零基础读者/);
+      assert.match(system, /术语用一句白话解释/);
+      assert.match(system, /保留全部事实、代码、链接、标题层级和结论/);
+      return '# 测试\n\n## 背景\n\n术语是某个概念的专门名称。\n\n## 结论\n\n明确收尾。';
+    },
+  );
+  assert.match(beginner.content, /^---[\s\S]*source: "\[\[来源\]\]"/);
+  assert.equal(beginner.review.blockers.length, 0);
+});
+
+test('optimizes safe publication warnings and keeps manual reminders', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-workbench-warning-'));
+  await mkdir(path.join(root, '.obsidian'));
+  const content = '---\ntitle: "新手指南"\nstatus: ready\n---\n\n# 新手指南\n\n## 背景\n\n这篇文章解释基础概念。\n\n## 结论\n\n完成。';
+  const before = await publicationAudit({ title: '新手指南', content }, root);
+  assert.deepEqual(new Set(before.fixableWarnings), new Set(['缺少摘要', '缺少标签']));
+  assert.match(before.warnings.join('；'), /可追踪来源/);
+  const result = await optimizePublicationWarnings(
+    { title: '新手指南', content },
+    root,
+    'test-key',
+    async () => '{"summary":"用白话解释一个基础概念。","tags":["入门","基础概念"]}',
+  );
+  assert.match(result.content, /summary: "用白话解释一个基础概念。"/);
+  assert.match(result.content, /tags: \["入门","基础概念"\]/);
+  assert.deepEqual(new Set(result.optimized), new Set(['缺少摘要', '缺少标签']));
+  assert.doesNotMatch(result.publicationReport.warnings.join('；'), /缺少摘要|缺少标签/);
+  assert.match(result.publicationReport.warnings.join('；'), /可追踪来源|reviewed|封面/);
 });
 
 test('turns DeepSeek authentication failures into a safe actionable error', async () => {
@@ -342,6 +387,19 @@ test('turns DeepSeek authentication failures into a safe actionable error', asyn
     })),
     error => error.code === 'invalid_deepseek_key' && /已从本机桥接清除/.test(error.message) && !/Authentication Fails/.test(error.message),
   );
+});
+
+test('sends imported code images as DeepSeek vision content', async () => {
+  let sent;
+  const result = await deepseekCompletion('system', 'read the code', 'sk-test-key-for-vision', async (_url, options) => {
+    sent = JSON.parse(options.body);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '# Result' } }] }) };
+  }, ['data:image/png;base64,iVBORw0KGgo=']);
+  assert.equal(result, '# Result');
+  assert.equal(sent.model, 'deepseek-flash');
+  assert.equal(sent.messages[1].content[0].type, 'text');
+  assert.equal(sent.messages[1].content[1].type, 'image_url');
+  assert.equal(sent.messages[1].content[1].image_url.detail, 'original');
 });
 
 test('records preflight misses and writes approved closure with deduplication', async () => {

@@ -11,7 +11,7 @@ const DEFAULT_ORIGINS = new Set([
   'http://127.0.0.1:3000',
   'https://cjy0722.github.io',
 ]);
-const IGNORED = new Set(['.obsidian', '.git', 'node_modules', '.data']);
+const IGNORED = new Set(['.obsidian', '.git', '.pytest_cache', 'node_modules', '.data']);
 
 function apiError(message, code = 'bad_request') {
   const error = new Error(message);
@@ -35,7 +35,7 @@ function safeTokenEqual(left, right) {
   return actual.length === expected.length && actual.length > 0 && timingSafeEqual(actual, expected);
 }
 
-async function readRequestBody(request, limit = 2_000_000) {
+async function readRequestBody(request, limit = 32_000_000) {
   let raw = '';
   for await (const chunk of request) {
     raw += chunk;
@@ -651,10 +651,10 @@ export async function searchNotes(query = '', limit = 10, root = DEFAULT_VAULT) 
   return results.sort((a, b) => b.score - a.score || b.updated.localeCompare(a.updated)).slice(0, Math.min(20, Math.max(1, Number(limit) || 10)));
 }
 
-function frontmatter(title, sourcePath, aiGenerated) {
+function frontmatter(title, sourcePath, aiGenerated, sourceLabel = '') {
   const date = new Date().toISOString().slice(0, 10);
-  const source = sourcePath ? `"[[${sourcePath.replace(/\.md$/i, '')}]]"` : '"用户原创"';
-  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: ${sourcePath ? 'knowledge' : 'original'}\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
+  const source = sourcePath ? `"[[${sourcePath.replace(/\.md$/i, '')}]]"` : JSON.stringify(sourceLabel || '用户原创');
+  return `---\ntitle: ${JSON.stringify(title)}\ntype: Content\ncreated: ${date}\nupdated: ${date}\nsource: ${source}\nsource_type: ${sourcePath ? 'knowledge' : sourceLabel ? 'imported' : 'original'}\ntopics: [CSDN]\ntags: [CSDN, 草稿]\nstatus: draft\nconfidence: 0.6\nai_generated: ${aiGenerated}\nreviewed: false\n---`;
 }
 
 function templateBody(title, sourcePath, sourceContent, instruction) {
@@ -662,14 +662,26 @@ function templateBody(title, sourcePath, sourceContent, instruction) {
   return `# ${title}\n\n> 写作要求：${instruction || '面向学生读者，保留来源，不虚构结果。'}\n\n## 先说结论\n\n待补充：用 2～3 句话说明这篇文章解决什么问题。\n\n## 背景与目标\n\n本文基于 [[${sourcePath.replace(/\.md$/i, '')}]] 整理。请在发布前核对原始资料。\n\n## 来源笔记要点\n\n${excerpt || '待补充：来源笔记暂无正文。'}\n\n## 实践步骤\n\n- 待补充：环境与前置条件\n- 待补充：核心操作\n- 待补充：验证方法\n\n## 常见问题\n\n待补充：只记录真实遇到或来源明确的问题。\n\n## 总结\n\n待补充：回顾结论，并给出可执行的下一步。`;
 }
 
-export async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_KEY, fetcher = fetch) {
+function visionImages(images = []) {
+  if (!Array.isArray(images) || images.length > 30) throw apiError('视觉材料最多包含 30 张页面或图片', 'visual_limit');
+  const normalized = images.map(value => String(value || ''));
+  if (normalized.some(value => !/^data:image\/(?:jpeg|png|gif|webp);base64,[a-z0-9+/=]+$/i.test(value))) throw apiError('视觉材料包含不支持的图片格式', 'invalid_visual_material');
+  if (normalized.reduce((sum, value) => sum + value.length, 0) > 24_000_000) throw apiError('视觉材料超过 24 MB，请拆分或压缩后重试', 'visual_limit');
+  return normalized;
+}
+
+export async function deepseekCompletion(system, user, key = process.env.DEEPSEEK_API_KEY, fetcher = fetch, images = []) {
   if (!key || key === 'YOUR_API_KEY_HERE') throw apiError('尚未配置 DeepSeek API Key', 'deepseek_not_configured');
+  const visualInputs = visionImages(images);
+  const userContent = visualInputs.length
+    ? [{ type: 'text', text: user }, ...visualInputs.map(url => ({ type: 'image_url', image_url: { url, detail: 'original' } }))]
+    : user;
   const response = await fetcher('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: process.env.DEEPSEEK_MODEL || 'deepseek-flash',
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      messages: [{ role: 'system', content: system }, { role: 'user', content: userContent }],
       stream: false,
     })
   });
@@ -684,25 +696,35 @@ export async function deepseekCompletion(system, user, key = process.env.DEEPSEE
   return text;
 }
 
-async function generateWithDeepSeek(sourcePath, sourceContent, instruction, writingContext = '', revise = false, key = process.env.DEEPSEEK_API_KEY) {
+async function generateWithDeepSeek(sourcePath, sourceContent, instruction, writingContext = '', revise = false, key = process.env.DEEPSEEK_API_KEY, images = []) {
   const system = revise
     ? '你是严谨的中文技术编辑。保留用户原文的结构、文风与事实含义，只按要求修改；资料不足处标记“待确认”。不得虚构运行结果、踩坑、数据或经验。输出完整 Markdown，不要输出 YAML frontmatter。'
     : '你是严谨的 CSDN 技术写作助手。只依据给定知识源写中文 Markdown；资料不足处标记“待确认”。不得虚构代码运行结果、踩坑经历、数据或个人经验。解释关键代码并保留来源 WikiLink。不要输出 YAML frontmatter。';
   const user = `写作要求：${instruction}\n来源路径：${sourcePath}\n\n知识源：\n${sourceContent.slice(0, 30000)}\n\n已检索的协作偏好与博客索引：\n${writingContext.slice(0, 10000)}`;
-  return withoutFrontmatter(await deepseekCompletion(system, user, key));
+  return withoutFrontmatter(await deepseekCompletion(system, user, key, fetch, images));
 }
 
-export async function generateDraft({ sourcePath, instruction = '', useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
+export async function generateDraft({ sourcePath = '', sourceName = '', visualText = '', images = [], title: requestedTitle = '', instruction = '', useAi = false, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
   if (preflightConfirmed !== true) throw apiError('生成初稿前必须完成知识库预检', 'preflight_required');
-  const source = ensureInside(root, sourcePath);
-  if (path.extname(source).toLowerCase() !== '.md') throw apiError('知识源必须是 Markdown 文件', 'invalid_source');
-  const sourceContent = await fs.readFile(source, 'utf8');
-  const sourceTitle = titleFromMarkdown(sourceContent, path.basename(source, '.md'));
-  const title = sourceTitle;
+  const visualInputs = visionImages(images);
+  let sourceContent = String(visualText || '').slice(0, 100_000);
+  let sourceTitle = String(requestedTitle || sourceName || '').replace(/\.[^.]+$/, '').trim();
+  if (sourcePath) {
+    const source = ensureInside(root, sourcePath);
+    if (path.extname(source).toLowerCase() !== '.md') throw apiError('知识源必须是 Markdown 文件', 'invalid_source');
+    sourceContent = await fs.readFile(source, 'utf8');
+    sourceTitle = titleFromMarkdown(sourceContent, path.basename(source, '.md'));
+  } else if (!visualInputs.length) {
+    throw apiError('请选择知识源或导入 PDF / 代码图片', 'source_required');
+  }
+  const title = sourceTitle || '导入材料整理';
+  const sourceLabel = sourcePath || String(sourceName || '导入视觉材料');
   const preflight = await writingPreflight({ topic: title }, root);
   const context = writingContext(preflight);
-  const body = useAi ? await generateWithDeepSeek(sourcePath, sourceContent, instruction, context, false, apiKey) : templateBody(title, sourcePath, sourceContent, instruction);
-  return { title, content: `${frontmatter(title, sourcePath, useAi)}\n\n${body.trim()}\n`, source: { path: sourcePath, title: sourceTitle }, mode: useAi ? 'ai' : 'template' };
+  const body = useAi
+    ? await generateWithDeepSeek(sourceLabel, sourceContent || '正文与代码信息见随附视觉材料。', instruction, context, false, apiKey, visualInputs)
+    : templateBody(title, sourcePath || sourceLabel, sourceContent, instruction);
+  return { title, content: `${frontmatter(title, sourcePath, useAi, sourcePath ? '' : sourceLabel)}\n\n${body.trim()}\n`, source: sourcePath ? { path: sourcePath, title: sourceTitle } : null, mode: useAi ? 'ai' : 'template' };
 }
 
 export async function reviseDraft({ title, content, instruction = '', useAi = true, preflightConfirmed = false }, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY) {
@@ -718,12 +740,14 @@ export async function reviseDraft({ title, content, instruction = '', useAi = tr
 export async function improveDraft({ title, content, kind, issues = [] }, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
   const source = String(content || '').replace(/\r\n?/g, '\n').trim();
   if (!source) throw apiError('正文不能为空', 'empty_draft');
-  if (!['fix', 'humanize'].includes(kind)) throw apiError('未知的草稿改写方式', 'invalid_improvement');
+  if (!['fix', 'humanize', 'beginner'].includes(kind)) throw apiError('未知的草稿改写方式', 'invalid_improvement');
   const metadata = source.match(/^---\s*\n[\s\S]*?\n---/)?.[0] || '';
   const body = withoutFrontmatter(source);
   const system = kind === 'fix'
     ? '你是严谨的中文技术编辑。只修正列出的审核问题，保留原文事实、结构意图、代码、链接和技术术语。不得虚构运行结果、数据、来源或个人经历。遇到资料不足的占位内容，应删除无法支持的主张或改成明确的资料边界，不得编造答案。形如 CJYPROTECTEDREF0TOKEN 的保护标记必须原样保留且只能出现一次。ASCII 图示每行不超过 60 个半角显示列。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。'
-    : '你是克制的中文技术编辑。让文章像真实作者写作：删除套话、机械过渡、重复总结和夸张措辞，调整长短句与段落节奏；保留全部事实、代码、链接、标题层级、技术术语和作者观点，不新增经验、结论或数据。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。';
+    : kind === 'beginner'
+      ? '你是面向零基础读者的中文技术编辑。把文章改写得通俗易懂：首次出现的术语用一句白话解释，复杂步骤拆成短句和有序步骤，必要时使用准确且不过度的生活类比；保留全部事实、代码、链接、标题层级和结论，不降低技术准确性，不删除关键条件，不虚构示例、运行结果、数据、来源或经历。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。'
+      : '你是克制的中文技术编辑。让文章像真实作者写作：删除套话、机械过渡、重复总结和夸张措辞，调整长短句与段落节奏；保留全部事实、代码、链接、标题层级、技术术语和作者观点，不新增经验、结论或数据。输出完整 Markdown 正文，不要输出 YAML frontmatter或解释。';
   const problemList = Array.isArray(issues) && issues.length ? issues.map(item => `- ${String(item)}`).join('\n') : '- 无指定问题，按任务目标检查全文';
   const rewritten = withoutFrontmatter(await complete(system, `文章标题：${String(title || '')}\n\n需要处理的问题：\n${problemList}\n\n当前 Markdown：\n${body.slice(0, 30000)}`, apiKey));
   const improved = `${metadata ? `${metadata}\n\n` : ''}${rewritten.trim()}\n`;
@@ -1019,6 +1043,7 @@ export async function publicationAudit({ path: relativePath = '', title, content
   if (/```(?:dataview|dataviewjs|query)/i.test(source)) warnings.push('仍包含 Obsidian 查询块，出站时只能降级为静态占位');
   const uniqueBlockers = [...new Set(blockers)];
   const uniqueWarnings = [...new Set(warnings)];
+  const fixableWarnings = uniqueWarnings.filter(item => metadataIssues.includes(item) || item === '检测到模板化表达，建议进行人工去 AI 味检查');
   const score = Math.max(0, 100 - uniqueBlockers.length * 18 - uniqueWarnings.length * 5);
   const platforms = Object.keys(PUBLISH_PLATFORMS).map(platform => {
     const prepared = preparePlatformPayload({ platform, title: cleanTitle, content: source });
@@ -1047,16 +1072,66 @@ export async function publicationAudit({ path: relativePath = '', title, content
     assets: { total: uniqueAssets.length, existing: uniqueAssets.length - missingAssets.length, missing: missingAssets },
     blockers: uniqueBlockers,
     fixableBlockers: [...new Set(review.blockers)],
+    fixableWarnings,
     warnings: uniqueWarnings,
     platforms,
     related: connections.related,
   };
 }
 
+function withMissingFrontmatter(content, values) {
+  const source = String(content || '');
+  const entries = Object.entries(values).filter(([, value]) => value !== undefined);
+  if (!entries.length) return source;
+  const lines = entries.map(([key, value]) => `${key}: ${Array.isArray(value) ? JSON.stringify(value) : JSON.stringify(String(value))}`);
+  const match = source.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return `---\n${lines.join('\n')}\n---\n\n${source}`;
+  return `---\n${match[1]}\n${lines.join('\n')}\n---${source.slice(match[0].length)}`;
+}
+
+export async function optimizePublicationWarnings({ path: relativePath = '', title, content } = {}, root = DEFAULT_VAULT, apiKey = process.env.DEEPSEEK_API_KEY, complete = deepseekCompletion) {
+  const source = String(content || '').replace(/\r\n?/g, '\n').trim();
+  if (!source) throw apiError('正文不能为空', 'empty_draft');
+  const before = await publicationAudit({ path: relativePath, title, content: source }, root);
+  if (!before.fixableWarnings.length) return { content: source, review: reviewCsdnDraft({ title, content: source }), publicationReport: before, optimized: [] };
+  let optimized = source;
+  const fixed = [];
+  const missingSummary = before.fixableWarnings.includes('缺少摘要');
+  const missingTags = before.fixableWarnings.includes('缺少标签');
+  if (missingSummary || missingTags) {
+    const protectedDraft = protectPublicationReferences(source, before);
+    const response = await complete(
+      '你是严谨的中文技术编辑。只依据给定文章生成发布元数据，不得补充文章中没有的事实。只输出严格 JSON：{"summary":"不超过120字的一句话摘要","tags":["2至5个简短标签"]}，不要输出 Markdown、代码围栏或解释。',
+      `文章标题：${String(title || '')}\n\n当前 Markdown：\n${withoutFrontmatter(protectedDraft.content).slice(0, 30000)}`,
+      apiKey,
+    );
+    let metadata;
+    try { metadata = JSON.parse(String(response).match(/\{[\s\S]*\}/)?.[0] || ''); }
+    catch { throw apiError('AI 未返回有效的摘要和标签，当前草稿未修改', 'invalid_ai_metadata'); }
+    const summary = String(metadata.summary || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const tags = [...new Set((Array.isArray(metadata.tags) ? metadata.tags : []).map(item => String(item).replaceAll('[', '').replaceAll(']', '').replace(/[,#\n\r]/g, '').trim()).filter(Boolean))].slice(0, 5);
+    if ((missingSummary && !summary) || (missingTags && tags.length < 2)) throw apiError('AI 返回的摘要或标签不完整，当前草稿未修改', 'invalid_ai_metadata');
+    optimized = withMissingFrontmatter(optimized, { summary: missingSummary ? summary : undefined, tags: missingTags ? tags : undefined });
+    if (missingSummary) fixed.push('缺少摘要');
+    if (missingTags) fixed.push('缺少标签');
+  }
+  if (before.fixableWarnings.includes('检测到模板化表达，建议进行人工去 AI 味检查')) {
+    const humanized = await improveDraft({ title, content: optimized, kind: 'humanize', issues: ['只改善被检测到的模板化表达'] }, apiKey, complete);
+    optimized = humanized.content;
+    fixed.push('模板化表达');
+  }
+  return {
+    content: optimized,
+    review: reviewCsdnDraft({ title, content: optimized }),
+    publicationReport: await publicationAudit({ path: relativePath, title, content: optimized }, root),
+    optimized: fixed,
+  };
+}
+
 function withPublicationStatus(content, status = 'ready') {
   const source = String(content || '');
   const match = source.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return source;
+  if (!match) return `---\nstatus: ${status}\n---\n\n${source}`;
   const metadata = /^status:\s*.*$/mi.test(match[1])
     ? match[1].replace(/^status:\s*.*$/mi, `status: ${status}`)
     : `${match[1]}\nstatus: ${status}`;
@@ -1212,6 +1287,7 @@ async function route(action, data, root, apiKey) {
   if (action === 'prepare_platform') return preparePlatformPayload(data);
   if (action === 'publication_audit') return publicationAudit(data, root);
   if (action === 'repair_publication') return repairPublicationDraft(data, root, apiKey);
+  if (action === 'optimize_publication_warnings') return optimizePublicationWarnings(data, root, apiKey);
   if (action === 'publish_pack') return createPublishPack(data);
   if (action === 'closure_preview') return previewClosure(data, root);
   if (action === 'commit_closure') return commitClosure(data, root);

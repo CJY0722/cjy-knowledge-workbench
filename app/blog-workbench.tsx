@@ -37,6 +37,7 @@ type PublicationReport = {
   assets: { total: number; existing: number; missing: string[] };
   blockers: string[];
   fixableBlockers?: string[];
+  fixableWarnings?: string[];
   warnings: string[];
   platforms: Array<{ platform: PlatformId; platformName: string; format: string; characters: number; warnings: string[]; conversions: string[]; ready: boolean }>;
   related: Array<{ path: string; score: number; reason: string }>;
@@ -46,9 +47,12 @@ type ClosurePreview = { summary: string; entries: Array<{ category: string; valu
 type WritingMode = 'manual' | 'ai' | 'revise';
 type HumanizerStatus = 'pending' | 'checked' | 'skipped';
 type MaterialKind = 'markdown' | 'visual';
+type VisualMaterial = { name: string; dataUrl: string; page?: number };
 
 const SESSION_KEY = 'cjy-blog-session-v1';
 const BLOG_GUIDE_URL = 'https://github.com/CJY0722/cjy-knowledge-workbench/blob/main/docs/BLOG_GUIDE.md';
+const VISUAL_SOURCE_LIMIT = 24_000_000;
+const PDF_PAGE_LIMIT = 30;
 const PLATFORMS: Array<{ id: PlatformId; name: string }> = [
   { id: 'csdn', name: 'CSDN' },
   { id: 'juejin', name: '掘金' },
@@ -77,7 +81,7 @@ function statusFromMarkdown(content: string): BlogStatus {
 
 function withDraftStatus(content: string, status: BlogStatus) {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return '';
+  if (!match) return `---\nstatus: ${status}\n---\n\n${content}`;
   const metadata = /^status:\s*.*$/mi.test(match[1])
     ? match[1].replace(/^status:\s*.*$/mi, `status: ${status}`)
     : `${match[1]}\nstatus: ${status}`;
@@ -111,6 +115,55 @@ function renderXiaohongshuCard(page: string, title: string, index: number, total
 function XiaohongshuCardPreview({ card, index }: { card: XiaohongshuCard; index: number }) {
   // oxlint-disable-next-line next/no-img-element -- local canvas data URL cannot use the framework image optimizer
   return <img src={card.dataUrl} alt={`小红书图文卡片第 ${index + 1} 张`} />;
+}
+
+function VisualMaterialPreview({ item }: { item: VisualMaterial }) {
+  // oxlint-disable-next-line next/no-img-element -- local file preview is never uploaded or served by the image optimizer
+  return <img src={item.dataUrl} alt={`${item.name}${item.page ? ` 第 ${item.page} 页` : ''}`} />;
+}
+
+async function fileToDataUrl(file: File) {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(new Error(`无法读取 ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function pdfToVisualMaterials(file: File) {
+  const pdfjs = await import('pdfjs-dist');
+  // @ts-expect-error -- Vite exposes the worker module source through the `?raw` suffix.
+  const workerSource = (await import('pdfjs-dist/build/pdf.worker.min.mjs?raw')).default;
+  if (!pdfjs.GlobalWorkerOptions.workerPort) {
+    const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+    pdfjs.GlobalWorkerOptions.workerPort = new Worker(workerUrl, { type: 'module' });
+  }
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  if (pdf.numPages > PDF_PAGE_LIMIT) throw new Error(`PDF 共 ${pdf.numPages} 页，当前最多导入 ${PDF_PAGE_LIMIT} 页，请拆分后重试。`);
+  const images: VisualMaterial[] = [];
+  const text: string[] = [];
+  let totalSize = 0;
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    text.push(`第 ${pageNumber} 页\n${textContent.items.map(item => 'str' in item ? item.str : '').join(' ')}`);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: Math.min(2, 1400 / baseViewport.width) });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('当前浏览器无法渲染 PDF 页面。');
+    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    totalSize += dataUrl.length;
+    if (totalSize > VISUAL_SOURCE_LIMIT) throw new Error('PDF 渲染结果超过 24 MB，请拆分或压缩 PDF 后重试。');
+    images.push({ name: file.name, dataUrl, page: pageNumber });
+    page.cleanup();
+  }
+  await pdf.destroy();
+  return { images, text: text.join('\n\n').slice(0, 100_000) };
 }
 
 async function copyText(value: string) {
@@ -158,6 +211,8 @@ export function BlogWorkbench({
   const [materialKind, setMaterialKind] = useState<MaterialKind>('markdown');
   const [visualVerified, setVisualVerified] = useState(false);
   const [visualEvidence, setVisualEvidence] = useState('');
+  const [visualMaterials, setVisualMaterials] = useState<VisualMaterial[]>([]);
+  const [visualText, setVisualText] = useState('');
   const [focusDecision, setFocusDecision] = useState<'pending' | 'confirmed' | 'skipped'>('pending');
   const [focus, setFocus] = useState('先给结论，再解释原理；只保留有来源或可验证的技术事实。');
   const [instruction, setInstruction] = useState('面向软件工程学生，解释关键代码，不虚构运行结果。');
@@ -217,14 +272,20 @@ export function BlogWorkbench({
   useEffect(() => {
     let active = true;
     try {
-      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') as Partial<{ mode: WritingMode; materialKind: MaterialKind; visualEvidence: string; title: string; draft: string; focus: string; instruction: string; source: SourceNote }>;
+      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}') as Partial<{ mode: WritingMode; materialKind: MaterialKind; visualEvidence: string; visualVerified: boolean; focusDecision: 'pending' | 'confirmed' | 'skipped'; title: string; draft: string; draftPath: string; draftUpdated: string; savedDraft: string; savedTitle: string; focus: string; instruction: string; source: SourceNote }>;
       queueMicrotask(() => {
         if (!active) return;
         if (saved.mode === 'manual' || saved.mode === 'ai' || saved.mode === 'revise') setMode(saved.mode);
         if (saved.materialKind === 'markdown' || saved.materialKind === 'visual') setMaterialKind(saved.materialKind);
         if (typeof saved.visualEvidence === 'string') setVisualEvidence(saved.visualEvidence);
+        if (typeof saved.visualVerified === 'boolean') setVisualVerified(saved.visualVerified);
+        if (saved.focusDecision === 'pending' || saved.focusDecision === 'confirmed' || saved.focusDecision === 'skipped') setFocusDecision(saved.focusDecision);
         if (typeof saved.title === 'string') setTitle(saved.title);
         if (typeof saved.draft === 'string') setDraft(saved.draft);
+        if (typeof saved.draftPath === 'string') setDraftPath(saved.draftPath);
+        if (typeof saved.draftUpdated === 'string') setDraftUpdated(saved.draftUpdated);
+        if (typeof saved.savedDraft === 'string') setSavedDraft(saved.savedDraft);
+        if (typeof saved.savedTitle === 'string') setSavedTitle(saved.savedTitle);
         if (typeof saved.focus === 'string') setFocus(saved.focus);
         if (typeof saved.instruction === 'string') setInstruction(saved.instruction);
         if (saved.source?.path) setSource(saved.source);
@@ -234,8 +295,8 @@ export function BlogWorkbench({
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ mode, materialKind, visualEvidence, title, draft, focus, instruction, source }));
-  }, [mode, materialKind, visualEvidence, title, draft, focus, instruction, source]);
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source }));
+  }, [mode, materialKind, visualEvidence, visualVerified, focusDecision, title, draft, draftPath, draftUpdated, savedDraft, savedTitle, focus, instruction, source]);
 
   const dirty = Boolean(draftPath && (draft !== savedDraft || title !== savedTitle));
   const retrievalCount = retrieval?.reduce((sum, item) => sum + item.matches.length, 0) || 0;
@@ -248,6 +309,7 @@ export function BlogWorkbench({
   const draftStatus = useMemo(() => statusFromMarkdown(draft), [draft]);
   const draftCounts = useMemo(() => Object.fromEntries(BLOG_STATUS_OPTIONS.map(item => [item.id, drafts.filter(draftItem => (draftItem.status || 'draft') === item.id).length])) as Record<BlogStatus, number>, [drafts]);
   const filteredDrafts = useMemo(() => draftFilter === 'all' ? drafts : drafts.filter(item => (item.status || 'draft') === draftFilter), [draftFilter, drafts]);
+  const hasVisualSource = materialKind === 'visual' && visualMaterials.length > 0;
 
   const invalidateOutcome = () => {
     setReview(null);
@@ -270,6 +332,7 @@ export function BlogWorkbench({
     if (draft.trim() && !window.confirm('新建原创文章会清空当前编辑区，是否继续？')) return;
     setMode('manual'); setTitle(''); setDraft(''); setDraftPath(''); setDraftUpdated('');
     setSavedDraft(''); setSavedTitle(''); setSource(null); setSources([]); setRetrieval(null);
+    setVisualMaterials([]); setVisualText(''); setVisualEvidence(''); setVisualVerified(false);
     setFocusDecision('pending'); setHumanizer('pending'); invalidateOutcome();
     onNotice('已新建原创文章，可以直接输入标题和正文。');
   };
@@ -286,6 +349,7 @@ export function BlogWorkbench({
       const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
       setMode('revise'); setTitle(heading || file.name.replace(/\.(md|markdown|txt)$/i, '')); setDraft(content);
       setDraftPath(''); setDraftUpdated(''); setSavedDraft(''); setSavedTitle(''); setSource(null);
+      setVisualMaterials([]); setVisualText(''); setVisualEvidence(''); setVisualVerified(false);
       setSources([]); setRetrieval(null); setFocusDecision('pending'); setHumanizer('pending'); invalidateOutcome();
       onNotice(`已导入 ${file.name}，修改后需要重新预检、审核和保存。`);
     } catch { onNotice('文章读取失败，请确认文件可以访问。'); }
@@ -294,6 +358,7 @@ export function BlogWorkbench({
   const selectSource = (item: SourceNote) => {
     if (draft.trim() && source?.path !== item.path && !window.confirm('更换知识源会清空当前编辑区，是否继续？')) return;
     setSource(item);
+    setVisualMaterials([]); setVisualText(''); setVisualEvidence(''); setVisualVerified(false);
     setSources([]);
     setRetrieval(null);
     setFocusDecision('pending');
@@ -332,7 +397,7 @@ export function BlogWorkbench({
 
   const generationIssue = () => {
     if (!bridgeOnline) return '请先连接本地 Obsidian。';
-    if (mode === 'ai' && !source) return '请先搜索并选择一篇知识源，再执行预检。';
+    if (mode === 'ai' && !source && !hasVisualSource) return '请先选择一篇知识源，或导入 PDF / 代码图片，再执行预检。';
     if (mode === 'revise' && !draft.trim()) return '请先导入、打开或粘贴已有文章。';
     if (!retrieval) return '请在选定材料后执行五类知识库预检。';
     if (focusDecision === 'pending') return '请先确认文章重点，或明确跳过重点讨论。';
@@ -348,7 +413,7 @@ export function BlogWorkbench({
     setBusy(useAi ? 'generate' : 'template');
     try {
       const result = mode === 'ai'
-        ? await request<{ title: string; content: string }>('generate_csdn', { sourcePath: source?.path, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, useAi, preflightConfirmed: true })
+        ? await request<{ title: string; content: string }>('generate_csdn', { sourcePath: source?.path, sourceName: hasVisualSource ? visualMaterials[0]?.name : '', visualText: hasVisualSource ? visualText : '', images: hasVisualSource ? visualMaterials.map(item => item.dataUrl) : [], title, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, useAi, preflightConfirmed: true })
         : await request<{ title: string; content: string }>('revise_csdn', { title, content: draft, instruction: `${focus}\n${instruction}${materialKind === 'visual' ? `\n视觉材料核验记录：${visualEvidence}` : ''}`, useAi, preflightConfirmed: true });
       setTitle(result.title);
       changeDraft(result.content);
@@ -365,6 +430,40 @@ export function BlogWorkbench({
     setAiConsentOpen(true);
   };
 
+  const importVisualMaterials = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!files.length) return;
+    if (files.some(file => file.size > 20_000_000)) return onNotice('单个视觉材料不能超过 20 MB。');
+    if (draft.trim() && !window.confirm('导入文件会清空当前编辑区，是否继续？')) return;
+    setBusy('visual-import');
+    try {
+      const materials: VisualMaterial[] = [];
+      const extractedText: string[] = [];
+      for (const file of files) {
+        if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
+          const parsed = await pdfToVisualMaterials(file);
+          materials.push(...parsed.images);
+          extractedText.push(parsed.text);
+        } else if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
+          materials.push({ name: file.name, dataUrl: await fileToDataUrl(file) });
+        } else {
+          throw new Error(`${file.name} 不是受支持的 PDF、PNG、JPEG、WebP 或 GIF。`);
+        }
+      }
+      if (materials.reduce((sum, item) => sum + item.dataUrl.length, 0) > VISUAL_SOURCE_LIMIT) throw new Error('视觉材料合计超过 24 MB，请减少文件或压缩图片。');
+      setMode('ai'); setMaterialKind('visual'); setSource(null); setSources([]); setRetrieval(null);
+      setDraft(''); setDraftPath(''); setSavedDraft(''); setReview(null);
+      setVisualMaterials(materials); setVisualText(extractedText.join('\n\n'));
+      setVisualEvidence(`已导入 ${files.map(file => file.name).join('、')}；请核对页面和代码截图后勾选确认。`);
+      setVisualVerified(false); setFocusDecision('pending'); invalidateOutcome();
+      setTitle(files[0].name.replace(/\.[^.]+$/, ''));
+      onNotice(`已导入 ${files.length} 个文件，共 ${materials.length} 张视觉页面；确认核验后可执行预检和 AI 生成。`);
+    } catch (error) { onNotice(error instanceof Error ? error.message : '视觉材料导入失败。'); }
+    finally { setBusy(''); }
+  };
+
   const reviewDraft = async () => {
     if (!title.trim() || !draft.trim()) return onNotice('标题和正文不能为空。');
     if (!workflowReady) return onNotice('请先完成知识库预检、重点确认和材料核验。');
@@ -377,13 +476,13 @@ export function BlogWorkbench({
     finally { setBusy(''); }
   };
 
-  const improveDraft = async (kind: 'fix' | 'humanize', requestedIssues?: string[]) => {
+  const improveDraft = async (kind: 'fix' | 'humanize' | 'beginner', requestedIssues?: string[]) => {
     if (!bridgeOnline) return onNotice('请先连接本地 Obsidian。');
     if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
     if (!title.trim() || !draft.trim()) return onNotice('标题和正文不能为空。');
     if (!requestedIssues && !workflowReady) return onNotice('请先完成知识库预检、重点确认和材料核验。');
     if (kind === 'fix' && !review && !requestedIssues) return onNotice('请先点击“审核检查”。');
-    const issues = requestedIssues || (kind === 'fix' ? review?.blockers || [] : review?.warnings || []);
+    const issues = requestedIssues || (kind === 'fix' ? review?.blockers || [] : kind === 'humanize' ? review?.warnings || [] : []);
     if (kind === 'fix' && !issues.length) return onNotice('当前没有需要修正的阻塞项。');
     setBusy(kind);
     try {
@@ -398,7 +497,9 @@ export function BlogWorkbench({
       setReview(result.review);
       onNotice(kind === 'fix'
         ? `正文阻塞修正完成，草稿复检后剩余 ${result.review.blockers.length} 项；请重新执行发布检查。`
-        : 'DeepSeek 去 AI 味完成，请复核全文并确认人工表达检查。');
+        : kind === 'beginner'
+          ? 'AI 小白化完成，请复核术语解释、代码和事实。'
+          : 'DeepSeek 去 AI 味完成，请复核全文并确认人工表达检查。');
     } catch (error) { onNotice(error instanceof Error ? error.message : '草稿改写失败'); }
     finally { setBusy(''); }
   };
@@ -408,16 +509,38 @@ export function BlogWorkbench({
     if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
     if (!publicationReport || !title.trim() || !draft.trim()) return onNotice('请先执行发布就绪检查。');
     setBusy('fix');
+    onNotice('AI 正在修复并重新执行发布检查，请稍候。');
     try {
       const result = await request<{ content: string; review: ReviewResult; publicationReport: PublicationReport; convertedLinks: number; statusAdjusted: boolean }>('repair_publication', { path: draftPath, title, content: draft });
+      const repairedContent = result.statusAdjusted ? withDraftStatus(result.content, 'ready') : result.content;
+      const publicationReport = repairedContent === result.content
+        ? result.publicationReport
+        : await request<PublicationReport>('publication_audit', { path: draftPath, title, content: repairedContent });
+      setDraft(repairedContent);
+      invalidateOutcome();
+      setReview(result.review);
+      setPublicationReport(publicationReport);
+      onNotice(publicationReport.blockers.length
+        ? `AI 自动修复并复检完成，仍有 ${publicationReport.blockers.length} 个无法安全自动解决的阻塞项。`
+        : 'AI 自动修复并复检完成，当前没有发布阻塞项；请审核后确认保存。');
+    } catch (error) { onNotice(error instanceof Error ? error.message : 'AI 自动修复失败'); }
+    finally { setBusy(''); }
+  };
+
+  const optimizePublicationWarnings = async () => {
+    if (!bridgeOnline) return onNotice('请先连接本地 Obsidian。');
+    if (!deepseekConfigured) return onNotice('请先在工作台设置中填写自己的 DeepSeek API Key。');
+    if (!publicationReport || !title.trim() || !draft.trim()) return onNotice('请先执行发布就绪检查。');
+    setBusy('warnings');
+    onNotice('AI 正在优化可安全处理的提醒并重新检查，请稍候。');
+    try {
+      const result = await request<{ content: string; review: ReviewResult; publicationReport: PublicationReport; optimized: string[] }>('optimize_publication_warnings', { path: draftPath, title, content: draft });
       setDraft(result.content);
       invalidateOutcome();
       setReview(result.review);
       setPublicationReport(result.publicationReport);
-      onNotice(result.publicationReport.blockers.length
-        ? `AI 自动修复并复检完成，仍有 ${result.publicationReport.blockers.length} 个无法安全自动解决的阻塞项。`
-        : 'AI 自动修复并复检完成，当前没有发布阻塞项；请审核后确认保存。');
-    } catch (error) { onNotice(error instanceof Error ? error.message : 'AI 自动修复失败'); }
+      onNotice(`已优化 ${result.optimized.length} 项提醒，仍有 ${result.publicationReport.warnings.length} 项需要复核；请审核后确认保存。`);
+    } catch (error) { onNotice(error instanceof Error ? error.message : '提醒优化失败'); }
     finally { setBusy(''); }
   };
 
@@ -470,9 +593,7 @@ export function BlogWorkbench({
   };
 
   const updateDraftStatus = (status: BlogStatus) => {
-    if (!draftPath) return onNotice('请先把文章写入 Obsidian，再设置内容管线状态。');
     const next = withDraftStatus(draft, status);
-    if (!next) return onNotice('当前文章没有 YAML frontmatter，请先通过工作台保存一次。');
     changeDraft(next);
     onNotice(`已把“${BLOG_STATUS_LABELS[status]}”写入编辑区；审核并保存后才会更新 Obsidian。`);
   };
@@ -586,9 +707,9 @@ export function BlogWorkbench({
         <div className="blog-card-title"><FilePenLine /><div><strong>写作设置</strong><span>先选路径，再进入初稿</span></div></div>
         <fieldset className="blog-choice-field"><legend>写作方式</legend><div className="blog-choice-group">{([['manual', '自己创作'], ['ai', 'AI 从知识源写'], ['revise', '修改已有文章']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={mode === value} onClick={() => { setMode(value); invalidateOutcome(); }}>{label}</button>)}</div></fieldset>
         <fieldset className="blog-choice-field"><legend>材料类型</legend><div className="blog-choice-group">{([['markdown', 'Markdown / 代码'], ['visual', 'PDF / 板书 / 图片']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={materialKind === value} onClick={() => { setMaterialKind(value); setVisualVerified(false); invalidateOutcome(); }}>{label}</button>)}</div></fieldset>
-        {materialKind === 'visual' && <div className="blog-visual-proof"><label htmlFor="blog-visual-evidence">渲染 / OCR 核验记录<Textarea id="blog-visual-evidence" value={visualEvidence} onChange={(event) => { setVisualEvidence(event.target.value); setVisualVerified(false); invalidateOutcome(); }} rows={3} placeholder="填写已核对的页面、图示要点或 OCR 结果笔记路径；工作台本身不伪装已完成 OCR" /></label><label aria-label="确认视觉材料已完成渲染或 OCR 核对" className="blog-check" htmlFor="blog-visual-verified"><input id="blog-visual-verified" type="checkbox" disabled={!visualEvidence.trim()} checked={visualVerified} onChange={(event) => { setVisualVerified(event.target.checked); invalidateOutcome(); }} /><span><strong>我已真正核对图像</strong><small>必须先留下核验记录；未核验时禁止审核与写入</small></span></label></div>}
+        {materialKind === 'visual' && <div className="blog-visual-proof"><label className="blog-file-button"><Upload />{busy === 'visual-import' ? '正在解析…' : '导入 PDF / 代码图片'}<input type="file" multiple disabled={busy === 'visual-import'} accept=".pdf,application/pdf,image/png,image/jpeg,image/webp,image/gif" onChange={importVisualMaterials} /></label>{visualMaterials.length > 0 && <div className="blog-visual-materials"><span>已准备 {visualMaterials.length} 张视觉页面</span><div>{visualMaterials.slice(0, 6).map((item, index) => <figure key={`${item.name}-${item.page || index}`}><VisualMaterialPreview item={item} /><figcaption>{item.page ? `${item.name} · 第 ${item.page} 页` : item.name}</figcaption></figure>)}</div>{visualMaterials.length > 6 && <small>另有 {visualMaterials.length - 6} 张页面已载入</small>}</div>}<label htmlFor="blog-visual-evidence">渲染 / OCR 核验记录<Textarea id="blog-visual-evidence" value={visualEvidence} onChange={(event) => { setVisualEvidence(event.target.value); setVisualVerified(false); invalidateOutcome(); }} rows={3} placeholder="导入后核对页面、图示和代码截图；必要时补充识别说明" /></label><label aria-label="确认视觉材料已完成渲染或 OCR 核对" className="blog-check" htmlFor="blog-visual-verified"><input id="blog-visual-verified" type="checkbox" disabled={!visualEvidence.trim() || (!visualMaterials.length && !draft.trim())} checked={visualVerified} onChange={(event) => { setVisualVerified(event.target.checked); invalidateOutcome(); }} /><span><strong>{visualVerified ? '已核对图像' : '我已真正核对图像'}</strong><small>{visualMaterials.length ? 'PDF 页面和代码图片会发送给 DeepSeek；未核验时禁止生成、审核与写入' : '初稿仍可继续审核；如需再次 AI 生成，请重新导入原文件'}</small></span></label></div>}
         <label htmlFor="blog-focus">文章重点<Textarea id="blog-focus" value={focus} onChange={(event) => { setFocus(event.target.value); setFocusDecision('pending'); invalidateOutcome(); }} rows={3} /></label>
-        <div className="blog-inline-actions"><Button variant="outline" onClick={() => setFocusDecision('skipped')}>明确跳过讨论</Button><Button onClick={() => setFocusDecision('confirmed')}><Check />确认重点</Button></div>
+        <div className="blog-inline-actions"><Button variant="outline" aria-pressed={focusDecision === 'skipped'} onClick={() => setFocusDecision('skipped')}>明确跳过讨论</Button><Button aria-pressed={focusDecision === 'confirmed'} onClick={() => setFocusDecision('confirmed')}>{focusDecision === 'confirmed' ? <CheckCircle2 /> : <Check />}{focusDecision === 'confirmed' ? '重点已确认' : '确认重点'}</Button></div>
       </section>
 
       <section className="plain-block blog-config-card">
@@ -608,7 +729,7 @@ export function BlogWorkbench({
     <section className="plain-block blog-editor-card">
       <header>
         <div><strong>Markdown 初稿</strong><span>{draftPath ? dirty ? '有未保存修改' : `已写入 ${draftPath}` : '尚未写入文件'}</span></div>
-        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
+        <div className="blog-inline-actions"><Button variant="outline" onClick={startManualDraft}><FilePlus2 />新建原创</Button><label className="blog-file-button"><Upload />导入 Markdown<input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importMarkdown} /></label><Button variant="outline" onClick={loadDrafts} disabled={busy === 'drafts'}><RefreshCw />打开已有文章</Button>{mode === 'ai' && !hasVisualSource && <Button variant="outline" onClick={() => generateDraft(false)} disabled={Boolean(busy)}>创建安全模板</Button>}{mode !== 'manual' && <Button onClick={requestAiGeneration} disabled={Boolean(busy)}><Sparkles />{mode === 'ai' ? 'AI 生成初稿' : 'AI 辅助修改'}</Button>}</div>
       </header>
       {drafts.length > 0 && <><div className="blog-pipeline-toolbar"><div><strong>内容管线</strong><small>{drafts.length} 篇文章 · 按 Obsidian frontmatter 状态筛选</small></div><div className="blog-pipeline-filters"><button type="button" aria-pressed={draftFilter === 'all'} onClick={() => setDraftFilter('all')}>全部 {drafts.length}</button>{BLOG_STATUS_OPTIONS.map(item => <button type="button" key={item.id} aria-pressed={draftFilter === item.id} onClick={() => setDraftFilter(item.id)}>{item.label} {draftCounts[item.id]}</button>)}</div></div><div className="blog-draft-list">{filteredDrafts.length ? filteredDrafts.map((item) => <button type="button" aria-label={`打开文章：${item.title}`} key={item.path} onClick={() => openDraft(item.path)}><span><strong>{item.title}</strong><small>{item.path} · {(item.characters || 0).toLocaleString('zh-CN')} 字</small></span><span className="blog-draft-meta"><Badge variant="outline">{BLOG_STATUS_LABELS[item.status || 'draft']}</Badge><small>内容质量 {item.qualityScore ?? '—'} · {item.issueCount ?? '—'} 项提醒</small><small>{new Date(item.updated).toLocaleString('zh-CN')}</small></span></button>) : <div className="blog-empty-row">当前状态下没有文章。</div>}</div></>}
       <label className="blog-title-field" htmlFor="blog-title">文章标题<Input id="blog-title" value={title} onChange={(event) => { setTitle(event.target.value); setRetrieval(null); invalidateOutcome(); }} maxLength={100} placeholder="输入文章标题" /></label>
@@ -620,13 +741,14 @@ export function BlogWorkbench({
     <section className="plain-block blog-publication-card">
       <header className="blog-publication-head">
         <div className="blog-card-title"><BookCheck /><div><strong>发布就绪检查</strong><span>只读核对元数据、内部链接、附件、平台转换和相关文章</span></div></div>
-        <div className="blog-inline-actions"><label htmlFor="blog-status">内容状态<select id="blog-status" value={draftStatus} disabled={!draftPath} onChange={(event) => updateDraftStatus(event.target.value as BlogStatus)}>{BLOG_STATUS_OPTIONS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><Button variant="outline" onClick={runPublicationAudit} disabled={Boolean(busy) || !draft.trim()}>{busy === 'publication-audit' ? <Loader2 className="spin" /> : <ShieldCheck />}检查当前文章</Button></div>
+        <div className="blog-inline-actions"><label htmlFor="blog-status">内容状态<select id="blog-status" value={draftStatus} disabled={!draft.trim()} onChange={(event) => updateDraftStatus(event.target.value as BlogStatus)}>{BLOG_STATUS_OPTIONS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><Button variant="outline" onClick={runPublicationAudit} disabled={Boolean(busy) || !draft.trim()}>{busy === 'publication-audit' ? <Loader2 className="spin" /> : <ShieldCheck />}检查当前文章</Button></div>
       </header>
       <small className="blog-meta">状态修改只进入当前编辑区，仍需按原流程审核并确认保存；检查结果不会自动修改任何文件。</small>
       {publicationReport ? <div className="blog-publication-report">
         <div className="blog-audit-score" data-ready={publicationReport.ready}><strong>{publicationReport.score}</strong><span>{publicationReport.ready ? '已达到发布准备状态' : `${publicationReport.blockers.length} 个阻塞项 · ${publicationReport.warnings.length} 条提醒`}</span></div>
         {(publicationReport.blockers.length > 0 || publicationReport.warnings.length > 0) && <div className="blog-audit-issues">{publicationReport.blockers.map(item => <small key={`block-${item}`} data-level="block">阻塞 · {item}</small>)}{publicationReport.warnings.map(item => <small key={`warn-${item}`}>提醒 · {item}</small>)}</div>}
-        {publicationReport.blockers.length > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void repairPublicationBlockers()} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}AI 自动修复</Button><small className="blog-meta">私有链接与附件路径会先在本机隐藏；AI 返回后自动恢复附件、转换不可发布链接并复检。</small></div>}
+        {publicationReport.blockers.length > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void repairPublicationBlockers()} disabled={Boolean(busy)}>{busy === 'fix' ? <Loader2 className="spin" /> : <Sparkles />}{busy === 'fix' ? '修复中…' : 'AI 自动修复'}</Button><small className="blog-meta">私有链接与附件路径会先在本机隐藏；AI 返回后自动恢复附件、转换不可发布链接并复检。</small></div>}
+        {(publicationReport.fixableWarnings?.length || 0) > 0 && <div className="blog-inline-actions"><Button variant="outline" onClick={() => void optimizePublicationWarnings()} disabled={Boolean(busy)}>{busy === 'warnings' ? <Loader2 className="spin" /> : <Sparkles />}{busy === 'warnings' ? '优化中…' : 'AI 优化提醒'}</Button><small className="blog-meta">自动补充摘要和标签、改善模板化表达；来源、审核标记、封面和图片仍需人工确认。</small></div>}
         <div className="blog-audit-grid">
           <article><strong>发布元数据</strong><span>状态：{BLOG_STATUS_LABELS[publicationReport.metadata.status]}</span><span>标题 {publicationReport.metadata.title ? '✓' : '△'} · 摘要 {publicationReport.metadata.summary ? '✓' : '△'} · 标签 {publicationReport.metadata.tags.length || '△'} · 封面 {publicationReport.metadata.cover ? '✓' : '△'}</span></article>
           <article><strong>内部链接</strong><span>{publicationReport.links.resolved}/{publicationReport.links.total} 可解析 · {publicationReport.links.backlinks.length} 条反向链接</span>{publicationReport.links.broken.length > 0 && <small>缺失：{publicationReport.links.broken.join('、')}</small>}{publicationReport.links.unpublished.length > 0 && <small>未公开：{publicationReport.links.unpublished.join('、')}</small>}</article>
@@ -648,8 +770,9 @@ export function BlogWorkbench({
         </div> : <div className="blog-pending"><TriangleAlert />尚未审核</div>}
         <div className="blog-humanizer-actions">
           <Button variant="outline" onClick={() => void improveDraft('humanize')} disabled={Boolean(busy)}>{busy === 'humanize' ? <Loader2 className="spin" /> : <Sparkles />}DeepSeek 去 AI 味</Button>
+          <Button variant="outline" onClick={() => void improveDraft('beginner')} disabled={Boolean(busy)}>{busy === 'beginner' ? <Loader2 className="spin" /> : <Sparkles />}AI 小白化</Button>
           <label htmlFor="blog-humanizer">人工确认<select id="blog-humanizer" value={humanizer} onChange={(event) => { setHumanizer(event.target.value as HumanizerStatus); setFinalized(false); setPublishPack(null); }}><option value="pending">等待人工复核</option><option value="checked">已完成人工表达检查</option><option value="skipped">明确跳过</option></select></label>
-          <small>AI 改写不会自动通过人工检查；请复核事实、代码和表达后再确认。</small>
+          <small>AI 改写不会自动通过人工检查；请复核事实、代码、术语解释和表达后再确认。</small>
         </div>
         <Button onClick={finalize} disabled={Boolean(busy)}><LockKeyhole />确认文章定稿</Button>
       </section>
@@ -661,7 +784,7 @@ export function BlogWorkbench({
 
     <Dialog open={saveOpen} onOpenChange={setSaveOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认写入 Markdown</DialogTitle><DialogDescription>已生成初稿不等于已写入。此操作会把当前版本保存到 Obsidian；同名文件仍需再次确认覆盖。</DialogDescription></DialogHeader><div className="blog-confirm-summary"><strong>{title || '未命名文章'}</strong><span>{review?.longArticle ? '长文：按完整段落顺序写入' : '普通文章：一次写入'}</span></div><DialogFooter><Button variant="outline" onClick={() => setSaveOpen(false)}>取消</Button><Button onClick={() => saveDraft(false)} disabled={busy === 'save'}>{busy === 'save' ? <Loader2 className="spin" /> : <Save />}确认并写入 Obsidian</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}本机桥接会使用你的 API Key 鉴权，但不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
+    <Dialog open={aiConsentOpen} onOpenChange={setAiConsentOpen}><DialogContent className="plain-dialog"><DialogHeader><DialogTitle>确认使用 DeepSeek 生成</DialogTitle><DialogDescription>{mode === 'ai' ? hasVisualSource ? `将把 ${visualMaterials.length} 张 PDF 页面或代码图片、提取文本、写作要求和预检摘要发送给 DeepSeek。` : '将把所选知识源、写作要求和预检摘要发送给 DeepSeek。' : '将把当前文章、修改要求和预检摘要发送给 DeepSeek。'}本机桥接会使用你的 API Key 鉴权，但不会发送平台账号、Cookie 或 Obsidian 完整路径。</DialogDescription></DialogHeader><div className="blog-ai-status" data-ready={deepseekConfigured}><strong>{deepseekConfigured ? 'DeepSeek 已配置，可以生成' : 'DeepSeek 尚未配置'}</strong><span>{deepseekConfigured ? '生成结果只进入当前编辑区，确认保存前不会写入 Obsidian。' : '请先在工作台设置中填写自己的 DeepSeek API Key。'}</span></div><DialogFooter><Button variant="outline" onClick={() => setAiConsentOpen(false)}>取消</Button>{deepseekConfigured ? <Button onClick={() => void generateDraft(true)}><Sparkles />同意并生成</Button> : <Button onClick={() => { setAiConsentOpen(false); onConfigure(); }}>打开设置</Button>}</DialogFooter></DialogContent></Dialog>
 
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent className="plain-dialog blog-publish-dialog"><DialogHeader><DialogTitle>多平台物料与发布中心</DialogTitle><DialogDescription>每个平台的发布按钮会复制对应正文并打开官方创作页；图片、标题和排版仍需人工核对，工作台不会读取平台账号或替你点击最终发布。</DialogDescription></DialogHeader><div className="blog-platform-grid">{PLATFORMS.map(platform => { const item = preparedPlatforms[platform.id]; return item && <article key={platform.id} className={platform.id === 'xiaohongshu' ? 'blog-platform-xhs' : ''}><header><strong>{platform.name}</strong><Badge variant="outline">{item.format}</Badge></header><span>{item.characters.toLocaleString('zh-CN')} 字 · {item.warnings.length} 条提醒</span>{item.conversions.length > 0 && <small className="blog-conversion-summary">已转换：{item.conversions.join('、')}</small>}{item.warnings.map(warning => <small key={warning}>△ {warning}</small>)}{platform.id === 'xiaohongshu' && <strong className="blog-xhs-mode-title">长文笔记 · 纯文本</strong>}<div className="blog-inline-actions"><Button variant="outline" onClick={async () => { await copyText(item.title); onNotice(`${platform.name} 标题已复制。`); }}><Clipboard />复制标题</Button><Button variant="outline" onClick={async () => { await copyText(item.content); onNotice(`${platform.name} 正文已复制。`); }}><Clipboard />复制正文</Button><Button onClick={() => void publishToPlatform(item)}><ExternalLink />发布到{platform.name}</Button></div>{platform.id === 'xiaohongshu' && xiaohongshuCards.length > 0 && <><div className="blog-xhs-card-heading"><strong>图文笔记 · {xiaohongshuCards.length} 张 PNG</strong><span>Markdown 已转为 1080 × 1440 图卡，请逐张下载上传。</span><Button onClick={() => void publishToPlatform(item, 'cards')}><ExternalLink />发布图文笔记</Button></div><div className="blog-xhs-cards">{xiaohongshuCards.map((card, index) => <figure key={card.filename}><XiaohongshuCardPreview card={card} index={index} /><figcaption><span>第 {index + 1} 张 · 1080 × 1440</span><a href={card.dataUrl} download={card.filename}>下载 PNG</a></figcaption></figure>)}</div></>}</article>; })}</div><DialogFooter><Button onClick={clearEditorAfterPublish} disabled={!publishStarted}><CheckCircle2 />已完成发布，清空编辑区</Button></DialogFooter></DialogContent></Dialog>
 
